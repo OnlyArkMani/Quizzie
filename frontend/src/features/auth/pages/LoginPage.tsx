@@ -149,19 +149,7 @@ const LoginPage = () => {
           </div>
         </motion.div>
 
-        {/* Demo Credentials */}
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ delay: 0.3 }}
-          className="mt-6 p-4 bg-indigo-50 border border-indigo-200 rounded-lg"
-        >
-          <p className="text-xs font-medium text-indigo-900 mb-2">Demo Credentials:</p>
-          <div className="space-y-1 text-xs text-indigo-700">
-            <p>Student: student@demo.com / password123</p>
-            <p>Examiner: examiner@demo.com / password123</p>
-          </div>
-        </motion.div>
+        
       </motion.div>
     </div>
   );
