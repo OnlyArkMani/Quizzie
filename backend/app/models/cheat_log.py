@@ -19,7 +19,8 @@ class CheatLog(Base):
     flag_type = Column(String(50), nullable=False)
     severity = Column(Enum(CheatSeverity), nullable=False)
     timestamp = Column(DateTime, default=datetime.utcnow)
-    metadata = Column(JSON, nullable=True)
+    # CHANGED: metadata -> meta_data (to avoid SQLAlchemy reserved word)
+    meta_data = Column(JSON, nullable=True)
     
     # Relationships
     attempt = relationship("ExamAttempt", back_populates="cheat_logs")
