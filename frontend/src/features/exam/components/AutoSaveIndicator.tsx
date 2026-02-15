@@ -1,79 +1,71 @@
-import { useEffect, useState } from 'react';
+import { useState, useEffect } from 'react';
+import { Cloud, Check, AlertCircle } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { CloudUpload, Check, CloudOff } from 'lucide-react';
 import { useExamStore } from '../store/examStore';
 import api from '@/lib/api';
 
+type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
+
 const AutoSaveIndicator = () => {
-  const { answers, attemptId } = useExamStore();
-  const [status, setStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [status, setStatus] = useState<SaveStatus>('idle');
+  const { attemptId, answers } = useExamStore();
 
   useEffect(() => {
-    // Auto-save every 10 seconds
-    const interval = setInterval(() => {
-      saveProgress();
-    }, 10000);
+    const autoSave = async () => {
+      if (!attemptId || answers.size === 0) return;
+
+      setStatus('saving');
+
+      try {
+        const responses = Array.from(answers.values()).map(answer => ({
+          question_id: answer.questionId,
+          selected_option_ids: answer.selectedOptions,
+          marked_for_review: answer.markedForReview,
+        }));
+
+        await api.post(`/attempts/${attemptId}/auto-save`, { responses });
+        
+        setStatus('saved');
+        setTimeout(() => setStatus('idle'), 2000);
+      } catch (error) {
+        console.error('Auto-save failed:', error);
+        setStatus('error');
+        setTimeout(() => setStatus('idle'), 3000);
+      }
+    };
+
+    const interval = setInterval(autoSave, 10000); // Auto-save every 10 seconds
 
     return () => clearInterval(interval);
-  }, [answers, attemptId]);
-
-  const saveProgress = async () => {
-    if (!attemptId) return;
-
-    setStatus('saving');
-
-    try {
-      // Convert answers Map to array for API
-      const responsesData = Array.from(answers.entries()).map(([questionId, answer]) => ({
-        question_id: questionId,
-        selected_options: answer.selectedOptions,
-        marked_for_review: answer.markedForReview,
-      }));
-
-      await api.post(`/attempts/${attemptId}/auto-save`, {
-        responses: responsesData,
-      });
-
-      setStatus('saved');
-      setTimeout(() => setStatus('idle'), 2000);
-    } catch (error) {
-      console.error('Auto-save failed:', error);
-      setStatus('error');
-      setTimeout(() => setStatus('idle'), 3000);
-    }
-  };
+  }, [attemptId, answers]);
 
   return (
-    <AnimatePresence>
+    <AnimatePresence mode="wait">
       {status !== 'idle' && (
         <motion.div
           initial={{ opacity: 0, y: -10 }}
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: -10 }}
-          className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm ${
-            status === 'saving'
-              ? 'bg-blue-500/20 text-blue-200'
-              : status === 'saved'
-              ? 'bg-emerald-500/20 text-emerald-200'
-              : 'bg-rose-500/20 text-rose-200'
-          }`}
+          className="flex items-center gap-2 text-sm"
         >
           {status === 'saving' && (
             <>
-              <CloudUpload className="w-4 h-4 animate-pulse" />
-              <span>Saving...</span>
+              <Cloud className="w-4 h-4 animate-pulse text-blue-400" />
+              <span className="text-slate-400">Saving...</span>
             </>
           )}
+          
           {status === 'saved' && (
             <>
-              <Check className="w-4 h-4" />
-              <span>Saved</span>
+              <Check className="w-4 h-4 text-emerald-400" />
+              <span className="text-emerald-400">Saved</span>
             </>
           )}
+          
           {status === 'error' && (
             <>
-              <CloudOff className="w-4 h-4" />
-              <span>Save failed</span>
+              <AlertCircle className="w-4 h-4 text-rose-400" />
+              <span className="text-rose-400">Save failed</span>
             </>
           )}
         </motion.div>
