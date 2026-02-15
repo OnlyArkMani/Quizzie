@@ -20,7 +20,7 @@
         .timer-stop { background-color: #991b1b !important; color: #ffffff !important; border: 3px solid #f87171 !important; animation: none; }
     </style>
 </head>
-<body onload="startTimer()">
+<body>
 
     <!-- TIMER -->
     <div id="timerContainer" class="fixed bottom-10 right-10 px-8 py-4 rounded-3xl flex items-center gap-4 transition-all">
@@ -200,24 +200,40 @@
         // TIMER
         let sec = 0;
         let timer = null;
+
         function startTimer() {
+            if (timer) return; // prevent multiple timers
+
             timer = setInterval(() => {
                 sec++;
                 let m = Math.floor(sec / 60);
                 let s = sec % 60;
-                document.getElementById('displayTime').innerText = `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+
+                const display = document.getElementById('displayTime');
+                const container = document.getElementById('timerContainer');
+                const icon = document.getElementById('timerIcon');
+
+                if (!display || !container || !icon) return;
+
+                display.innerText = `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 
                 if (sec >= 480 && sec < 600) {
-                    document.getElementById('timerContainer').classList.add('timer-warning');
-                    document.getElementById('timerIcon').classList.replace('fa-hourglass-start', 'fa-hourglass-half');
+                    container.classList.add('timer-warning');
+                    icon.classList.remove('fa-hourglass-start');
+                    icon.classList.add('fa-hourglass-half');
                 } else if (sec >= 600) {
                     clearInterval(timer);
-                    document.getElementById('timerContainer').classList.replace('timer-warning', 'timer-stop');
-                    document.getElementById('displayTime').innerText = "10:00";
-                    document.getElementById('timerIcon').classList.replace('fa-hourglass-half', 'fa-hourglass-end');
+                    container.classList.remove('timer-warning');
+                    container.classList.add('timer-stop');
+                    display.innerText = "10:00";
+                    icon.classList.remove('fa-hourglass-half');
+                    icon.classList.add('fa-hourglass-end');
                 }
             }, 1000);
         }
+
+        // ensure timer starts after DOM loads
+        document.addEventListener('DOMContentLoaded', startTimer);
 
         // CHART
         const ctx = document.getElementById('resultsChart').getContext('2d');
