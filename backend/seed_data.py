@@ -3,10 +3,13 @@ Seed database with sample data for testing
 """
 from sqlalchemy.orm import Session
 from app.core.database import SessionLocal
-from app.core.security import get_password_hash
 from app.models.user import User
 from app.models.exam import Exam
 from app.models.question import Question, Option
+from passlib.context import CryptContext
+
+# Create password context
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 def seed_db():
     db = SessionLocal()
@@ -14,17 +17,30 @@ def seed_db():
     try:
         print("Seeding database...")
         
+        # Check if users already exist
+        existing_student = db.query(User).filter(User.email == "student@demo.com").first()
+        if existing_student:
+            print("  Users already exist!")
+            print("\n Test Credentials:")
+            print("   Student: student@demo.com / pass123")
+            print("   Examiner: examiner@demo.com / pass123")
+            return
+        
+        # Hash passwords directly (avoiding the 72-byte limit issue)
+        student_password = pwd_context.hash("pass123")
+        examiner_password = pwd_context.hash("pass123")
+        
         # Create sample users
         student = User(
             email="student@demo.com",
-            password_hash=get_password_hash("password123"),
+            password_hash=student_password,
             full_name="John Student",
             role="student"
         )
         
         examiner = User(
             email="examiner@demo.com",
-            password_hash=get_password_hash("password123"),
+            password_hash=examiner_password,
             full_name="Jane Examiner",
             role="examiner"
         )
@@ -41,7 +57,7 @@ def seed_db():
             title="Data Structures Final Exam",
             description="Comprehensive exam covering arrays, linked lists, trees, and graphs",
             duration_minutes=90,
-            total_marks=100,
+            total_marks=15,
             pass_percentage=40,
             status="live",
             created_by=examiner.id
@@ -53,7 +69,7 @@ def seed_db():
         
         print(" Exam created")
         
-        # Create sample questions
+        # Question 1
         question1 = Question(
             exam_id=exam.id,
             question_text="What is the time complexity of binary search?",
@@ -62,31 +78,27 @@ def seed_db():
             topic="Algorithms",
             display_order=0
         )
-        
         db.add(question1)
         db.flush()
         
-        # Add options for question 1
         options1 = [
             Option(question_id=question1.id, option_text="O(n)", is_correct=False, display_order=0),
             Option(question_id=question1.id, option_text="O(log n)", is_correct=True, display_order=1),
             Option(question_id=question1.id, option_text="O(n²)", is_correct=False, display_order=2),
             Option(question_id=question1.id, option_text="O(1)", is_correct=False, display_order=3),
         ]
-        
         for opt in options1:
             db.add(opt)
         
         # Question 2
         question2 = Question(
             exam_id=exam.id,
-            question_text="Which data structures use LIFO principle?",
+            question_text="Which data structures use LIFO principle? (Select all that apply)",
             question_type="multiple",
             marks=5,
             topic="Data Structures",
             display_order=1
         )
-        
         db.add(question2)
         db.flush()
         
@@ -96,8 +108,28 @@ def seed_db():
             Option(question_id=question2.id, option_text="Recursion Call Stack", is_correct=True, display_order=2),
             Option(question_id=question2.id, option_text="Array", is_correct=False, display_order=3),
         ]
-        
         for opt in options2:
+            db.add(opt)
+        
+        # Question 3
+        question3 = Question(
+            exam_id=exam.id,
+            question_text="What is the best case time complexity of Quick Sort?",
+            question_type="single",
+            marks=5,
+            topic="Algorithms",
+            display_order=2
+        )
+        db.add(question3)
+        db.flush()
+        
+        options3 = [
+            Option(question_id=question3.id, option_text="O(n)", is_correct=False, display_order=0),
+            Option(question_id=question3.id, option_text="O(n log n)", is_correct=True, display_order=1),
+            Option(question_id=question3.id, option_text="O(n²)", is_correct=False, display_order=2),
+            Option(question_id=question3.id, option_text="O(log n)", is_correct=False, display_order=3),
+        ]
+        for opt in options3:
             db.add(opt)
         
         db.commit()
@@ -105,8 +137,8 @@ def seed_db():
         print(" Questions created")
         print("\n🎉 Database seeded successfully!")
         print("\n Test Credentials:")
-        print("   Student: student@demo.com / password123")
-        print("   Examiner: examiner@demo.com / password123")
+        print("   Student: student@demo.com / pass123")
+        print("   Examiner: examiner@demo.com / pass123")
         
     except Exception as e:
         print(f" Error seeding database: {e}")
