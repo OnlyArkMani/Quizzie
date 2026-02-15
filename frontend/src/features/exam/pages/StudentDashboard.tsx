@@ -31,22 +31,22 @@ const StudentDashboard = () => {
   }, []);
 
   const fetchDashboardData = async () => {
-    try {
-      const [examsRes, attemptsRes, statsRes] = await Promise.all([
-        api.get('/exams?status=live'),
-        api.get('/attempts/my-attempts?limit=5'),
-        api.get('/analytics/student/me/stats'),
-      ]);
+  try {
+    const [examsRes, attemptsRes, statsRes] = await Promise.all([
+      api.get('/exams/?status=live'),  // Note the trailing slash
+      api.get('/attempts/my-attempts?limit=5'),
+      api.get('/analytics/student/me/stats'),
+    ]);
 
-      setAvailableExams(examsRes.data);
-      setRecentAttempts(attemptsRes.data);
-      setStats(statsRes.data);
-    } catch (error) {
-      console.error('Failed to fetch dashboard data:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
+    setAvailableExams(examsRes.data);
+    setRecentAttempts(attemptsRes.data);
+    setStats(statsRes.data);
+  } catch (error) {
+    console.error('Failed to fetch dashboard data:', error);
+  } finally {
+    setLoading(false);
+  }
+};
 
   const handleStartExam = (examId: string) => {
     navigate(`/student/exam/${examId}/lobby`);
@@ -115,7 +115,7 @@ const StudentDashboard = () => {
               <div>
                 <p className="text-sm text-slate-600">Average Score</p>
                 <p className="text-2xl font-bold text-slate-900">
-                  {stats.averageScore.toFixed(1)}%
+                  {stats.averageScore != null ? stats.averageScore.toFixed(1) : '0.0'}%
                 </p>
               </div>
             </div>
@@ -221,13 +221,17 @@ const StudentDashboard = () => {
                       <p className="text-sm font-medium text-slate-900">
                         Exam #{attempt.exam_id.slice(0, 8)}
                       </p>
-                      {attempt.score !== undefined && (
+                      {attempt.score !== undefined && attempt.score !== null ? (
                         <span className={`text-sm font-semibold ${
                           attempt.score >= 70 ? 'text-emerald-600' : 
                           attempt.score >= 40 ? 'text-amber-600' : 
                           'text-rose-600'
                         }`}>
                           {attempt.score.toFixed(0)}%
+                        </span>
+                      ) : (
+                        <span className="text-xs text-slate-500 bg-slate-100 px-2 py-1 rounded">
+                          {attempt.status === 'in_progress' ? 'In Progress' : 'Pending'}
                         </span>
                       )}
                     </div>
