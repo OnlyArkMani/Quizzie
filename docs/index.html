@@ -3,695 +3,237 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Quizzie - AI-Powered Online Examination Platform | Ark Mani</title>
-    <meta name="description" content="Quizzie is an intelligent online examination platform with AI-powered proctoring, real-time monitoring, and comprehensive analytics. Built with React, FastAPI, and MediaPipe.">
-    <meta name="keywords" content="Online Exam, AI Proctoring, Face Detection, Education Technology, React, FastAPI, Machine Learning">
-    <meta name="author" content="Ark Mani">
-    
-    <!-- Open Graph Meta Tags -->
-    <meta property="og:title" content="Quizzie - AI-Powered Online Examination Platform">
-    <meta property="og:description" content="Smart online examination system with real-time AI proctoring and automated evaluation">
-    <meta property="og:type" content="website">
-    <meta property="og:url" content="https://onlyarkmani.github.io/Quizzie/">
-    
-    <!-- Favicon -->
-    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📝</text></svg>">
-    
-    <!-- Google Fonts -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-    
-    <!-- Font Awesome -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-    
-    <!-- AOS Animation Library -->
-    <link href="https://unpkg.com/aos@2.3.1/dist/aos.css" rel="stylesheet">
-    
-    <!-- Custom CSS -->
-    <link rel="stylesheet" href="css/style.css">
+    <title>PBL Presentation | 2026</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;800&display=swap');
+        body { background-color: #020617; color: #f8fafc; font-family: 'Plus Jakarta Sans', sans-serif; scroll-behavior: smooth; }
+        .glass { background: rgba(255, 255, 255, 0.03); backdrop-filter: blur(15px); border: 1px solid rgba(255, 255, 255, 0.1); }
+        .gradient-text { background: linear-gradient(90deg, #60a5fa, #a855f7); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        
+        /* TIMER UI */
+        #timerContainer { background: #ffffff; color: #020617; box-shadow: 0 10px 40px rgba(0,0,0,0.8); border: 3px solid #3b82f6; z-index: 1000; }
+        @keyframes flicker { 0%, 100% { background-color: #ffffff; } 50% { background-color: #fca5a5; } }
+        .timer-warning { animation: flicker 1s infinite; border: 3px solid #ef4444 !important; color: #b91c1c !important; }
+        .timer-stop { background-color: #991b1b !important; color: #ffffff !important; border: 3px solid #f87171 !important; animation: none; }
+    </style>
 </head>
-<body>
-    <!-- Timer Display -->
-    <div id="timer" class="timer">
-        <i class="fas fa-stopwatch"></i>
-        <span id="timer-display">00:00:00</span>
+<body onload="startTimer()">
+
+    <!-- TIMER -->
+    <div id="timerContainer" class="fixed bottom-10 right-10 px-8 py-4 rounded-3xl flex items-center gap-4 transition-all">
+        <i class="fas fa-hourglass-start text-blue-600 text-2xl" id="timerIcon"></i>
+        <span id="displayTime" class="text-4xl font-black font-mono tracking-tighter">00:00</span>
     </div>
 
-    <!-- Navigation -->
-    <nav class="navbar">
-        <div class="container">
-            <div class="nav-brand">
-                <i class="fas fa-graduation-cap"></i>
-                <span>Quizzie</span>
+    <!-- NAVBAR -->
+    <nav class="fixed w-full z-50 glass border-b border-slate-800/50 px-8 py-4 flex justify-between items-center">
+        <div class="flex items-center gap-4">
+            <div class="bg-white p-1 rounded flex items-center justify-center shadow-md" style="height: 48px; width: 48px;">
+                <img src="mujlogo.jpg" alt="MUJ" class="h-full w-auto object-contain" onerror="this.src='https://via.placeholder.com/50?text=MUJ'">
             </div>
-            <ul class="nav-menu">
-                <li><a href="#home" class="nav-link active">Home</a></li>
-                <li><a href="#about" class="nav-link">About</a></li>
-                <li><a href="#features" class="nav-link">Features</a></li>
-                <li><a href="#technology" class="nav-link">Technology</a></li>
-                <li><a href="#gallery" class="nav-link">Gallery</a></li>
-                <li><a href="#team" class="nav-link">Team</a></li>
-                <li><a href="#contact" class="nav-link">Contact</a></li>
-            </ul>
-            <button class="mobile-menu-toggle">
-                <i class="fas fa-bars"></i>
-            </button>
+            <div class="flex flex-col text-left">
+                <span class="text-xl font-black text-white leading-none uppercase tracking-tighter">PBL <span class="text-blue-500 italic">2026</span></span>
+                <span class="text-[9px] text-slate-400 font-bold uppercase tracking-widest mt-1">Department of Computer Science & Engineering</span>
+            </div>
         </div>
     </nav>
 
-    <!-- Hero Section -->
-    <section id="home" class="hero">
-        <div class="hero-bg">
-            <div class="gradient-orb orb-1"></div>
-            <div class="gradient-orb orb-2"></div>
-            <div class="gradient-orb orb-3"></div>
-        </div>
-        <div class="container">
-            <div class="hero-content" data-aos="fade-up">
-                <div class="hero-badge">
-                    <i class="fas fa-certificate"></i>
-                    <span>PBL Project 2026</span>
-                </div>
-                <h1 class="hero-title">
-                    <span class="gradient-text">Quizzie</span>
-                    <br>AI-Powered Online Examination Platform
-                </h1>
-                <p class="hero-description">
-                    An intelligent, secure, and comprehensive online examination system featuring real-time AI proctoring, 
-                    automated evaluation, and advanced analytics for educational institutions.
+    <main class="max-w-6xl mx-auto px-6 pt-48 pb-32 space-y-32">
+        
+        <!-- HERO -->
+        <section class="text-center">
+            <div class="inline-block px-4 py-1 border border-slate-800 rounded-full text-slate-500 text-[10px] font-mono mb-6 uppercase tracking-widest">
+                Reg No: 23FE10CSE00793
+            </div>
+            <h1 class="text-6xl md:text-7xl font-extrabold mb-8 uppercase leading-tight">
+                <span class="gradient-text">Web Application Based PBL Project</span>
+            </h1>
+
+            <p class="text-slate-400 max-w-3xl mx-auto text-lg leading-relaxed border-l-2 border-blue-500/30 pl-6 text-left">
+                This project presents the design and development of a structured web application built as part of the
+                Project‑Based Learning (PBL) curriculum. The objective is to create a scalable, user‑focused, and
+                performance‑oriented application using modern web technologies while following clean architecture,
+                modular development, and industry‑relevant engineering practices.
+            </p>
+        </section>
+
+        <!-- PROBLEM -->
+        <section class="grid md:grid-cols-2 gap-12 items-stretch">
+            <div class="glass p-10 rounded-[2.5rem] flex flex-col justify-center border-l-4 border-blue-600">
+                <h2 class="text-3xl font-extrabold mb-6">Problem Statement</h2>
+                <p class="text-slate-400 leading-relaxed text-justify">
+                    Many academic web projects lack scalability, structured architecture, and real‑world deployment
+                    readiness. This project addresses the gap by developing a professional‑grade web application
+                    following modern development workflows, version control, modular backend integration, and
+                    production‑ready UI/UX design principles.
                 </p>
-                <div class="hero-stats">
-                    <div class="stat-item">
-                        <div class="stat-number">95%</div>
-                        <div class="stat-label">Detection Accuracy</div>
-                    </div>
-                    <div class="stat-item">
-                        <div class="stat-number">100%</div>
-                        <div class="stat-label">Automated Grading</div>
-                    </div>
-                    <div class="stat-item">
-                        <div class="stat-number">Real-time</div>
-                        <div class="stat-label">Monitoring</div>
-                    </div>
+            </div>
+
+            <div class="space-y-6">
+                <div class="glass p-7 rounded-3xl border-r-4 border-blue-500/50">
+                    <h3 class="text-blue-400 font-bold text-xs uppercase tracking-widest mb-2">Research & Existing Systems</h3>
+                    <p class="text-sm text-slate-500 italic">
+                        Analysis of conventional academic web systems, open‑source templates, and lightweight
+                        full‑stack implementations to identify limitations in usability, deployment, and
+                        maintainability.
+                    </p>
                 </div>
-                <div class="hero-buttons">
-                    <a href="https://github.com/OnlyArkMani/Quizzie" target="_blank" class="btn btn-primary">
-                        <i class="fab fa-github"></i>
-                        View on GitHub
+
+                <div class="glass p-7 rounded-3xl border-r-4 border-purple-500/50">
+                    <h3 class="text-purple-400 font-bold text-xs uppercase tracking-widest mb-2">Innovation</h3>
+                    <p class="text-sm text-slate-500 italic">
+                        Integration of structured frontend design, backend logic separation, responsive UI,
+                        and deployment‑ready architecture aligned with modern industry development standards.
+                    </p>
+                </div>
+            </div>
+        </section>
+
+        <!-- METHODOLOGY -->
+        <section class="space-y-12">
+            <h2 class="text-4xl font-black text-center uppercase tracking-tight">
+                System <span class="text-blue-500">Methodology</span>
+            </h2>
+
+            <div class="grid md:grid-cols-3 gap-8">
+                <div class="glass p-8 rounded-3xl text-center">
+                    <i class="fas fa-database text-blue-500 text-3xl mb-4"></i>
+                    <h3 class="font-bold mb-2 uppercase text-xs tracking-widest">Input & Data Handling</h3>
+                    <p class="text-sm text-slate-500">
+                        Structured user input, validation mechanisms, and database‑ready data processing.
+                    </p>
+                </div>
+
+                <div class="glass p-8 rounded-3xl text-center">
+                    <i class="fas fa-microchip text-purple-500 text-3xl mb-4"></i>
+                    <h3 class="font-bold mb-2 uppercase text-xs tracking-widest">Application Architecture</h3>
+                    <p class="text-sm text-slate-500">
+                        Modular frontend‑backend workflow, clean routing, and maintainable component structure.
+                    </p>
+                </div>
+
+                <div class="glass p-8 rounded-3xl text-center border-2 border-green-500/20 bg-green-500/5">
+                    <i class="fab fa-python text-green-500 text-3xl mb-4"></i>
+                    <h3 class="font-bold mb-4 uppercase text-xs tracking-widest text-green-400">Live Demonstration</h3>
+                    <a href="https://www.linkedin.com/in/ark-mani-924694200/" target="_blank" class="px-6 py-2 bg-green-600 rounded-full text-[10px] font-black hover:bg-green-500 transition shadow-lg shadow-green-900/40">
+                        View Project Profile
                     </a>
-                    <a href="#about" class="btn btn-secondary">
-                        <i class="fas fa-arrow-down"></i>
-                        Learn More
-                    </a>
                 </div>
             </div>
-        </div>
-        <div class="scroll-indicator">
-            <div class="mouse"></div>
-        </div>
-    </section>
+        </section>
 
-    <!-- About Section -->
-    <section id="about" class="section-about">
-        <div class="container">
-            <div class="section-header" data-aos="fade-up">
-                <span class="section-subtitle">Project Overview</span>
-                <h2 class="section-title">About Quizzie</h2>
-                <p class="section-description">
-                    A next-generation online examination platform that revolutionizes the way assessments are conducted
-                </p>
-            </div>
-            
-            <div class="about-content">
-                <div class="about-card" data-aos="fade-up" data-aos-delay="100">
-                    <div class="about-icon">
-                        <i class="fas fa-lightbulb"></i>
+        <!-- RESULTS -->
+        <section class="glass p-12 rounded-[3.5rem] border-t-4 border-blue-500">
+            <h2 class="text-3xl font-black mb-12 text-center uppercase tracking-tight">
+                Results & <span class="text-blue-500">Analysis</span>
+            </h2>
+
+            <div class="grid md:grid-cols-2 gap-16 items-center">
+                <div class="h-80"><canvas id="resultsChart"></canvas></div>
+
+                <div class="space-y-6">
+                    <div class="p-6 rounded-2xl bg-white/5 flex justify-between items-center border border-white/10 shadow-inner">
+                        <span class="text-slate-400 font-bold uppercase text-xs tracking-widest">Performance Improvement</span>
+                        <span class="text-blue-400 font-mono font-black text-3xl">92%</span>
                     </div>
-                    <h3>Problem Statement</h3>
-                    <p>
-                        Traditional online examinations lack robust proctoring mechanisms, making them vulnerable to malpractices. 
-                        Manual invigilation is resource-intensive and often ineffective in remote settings. There's a critical need 
-                        for an intelligent, automated solution that ensures examination integrity while providing seamless user experience.
+
+                    <p class="text-slate-500 text-sm italic text-justify leading-relaxed">
+                        The developed application demonstrates improved usability, structured architecture,
+                        and stable functional performance compared to conventional academic implementations.
                     </p>
                 </div>
+            </div>
+        </section>
 
-                <div class="about-card" data-aos="fade-up" data-aos-delay="200">
-                    <div class="about-icon">
-                        <i class="fas fa-rocket"></i>
-                    </div>
-                    <h3>Our Solution</h3>
-                    <p>
-                        Quizzie leverages cutting-edge AI and machine learning technologies to create a comprehensive examination ecosystem. 
-                        The platform integrates real-time face detection, head pose estimation, and audio analysis to monitor exam integrity. 
-                        Combined with automated evaluation, detailed analytics, and an intuitive interface, Quizzie ensures fair, secure, 
-                        and efficient online assessments for educational institutions.
-                    </p>
+        <!-- TEAM -->
+        <section class="text-center pt-10 border-t border-slate-900">
+            <h2 class="text-[10px] font-black text-slate-600 uppercase tracking-[0.5em] mb-12">Academic Information</h2>
+
+            <div class="flex flex-wrap justify-center gap-10">
+                <div class="glass px-12 py-8 rounded-[2rem] border-b-4 border-blue-600">
+                    <p class="text-[9px] font-bold text-blue-500 mb-2 uppercase tracking-widest">Project Guide</p>
+                    <p class="font-black text-xl text-slate-100">Mr. Sachin Gupta</p>
+                    <p class="text-[10px] text-slate-500 mt-1">Duration: Jan 2026 – Feb 2026</p>
                 </div>
 
-                <div class="about-card" data-aos="fade-up" data-aos-delay="300">
-                    <div class="about-icon">
-                        <i class="fas fa-trophy"></i>
-                    </div>
-                    <h3>Key Achievements</h3>
-                    <ul class="achievement-list">
-                        <li><i class="fas fa-check"></i> 95% accuracy in cheating detection using MediaPipe AI</li>
-                        <li><i class="fas fa-check"></i> Real-time monitoring with sub-second latency</li>
-                        <li><i class="fas fa-check"></i> 100% automated evaluation and instant results</li>
-                        <li><i class="fas fa-check"></i> Comprehensive analytics with topic-wise performance tracking</li>
-                        <li><i class="fas fa-check"></i> Fully responsive design supporting multiple devices</li>
-                    </ul>
+                <div class="glass px-12 py-8 rounded-[2rem] border-b-4 border-slate-700">
+                    <p class="text-[9px] font-bold text-slate-400 mb-2 uppercase tracking-widest">Team Member</p>
+                    <p class="font-black text-xl text-slate-100">Ark Mani</p>
+                    <p class="text-[10px] text-slate-500 mt-1">23FE10CSE00793</p>
+                </div>
+
+                <div class="glass px-12 py-8 rounded-[2rem] border-b-4 border-slate-700">
+                    <p class="text-[9px] font-bold text-slate-400 mb-2 uppercase tracking-widest">Team Member</p>
+                    <p class="font-black text-xl text-slate-100">Rishabh Jain</p>
+                    <p class="text-[10px] text-slate-500 mt-1">23FE10CSE00784</p>
                 </div>
             </div>
 
-            <!-- Project Info Cards -->
-            <div class="info-grid" data-aos="fade-up" data-aos-delay="400">
-                <div class="info-card">
-                    <i class="fas fa-university"></i>
-                    <h4>Institution</h4>
-                    <p>Manipal University Jaipur</p>
-                </div>
-                <div class="info-card">
-                    <i class="fas fa-calendar-alt"></i>
-                    <h4>Duration</h4>
-                    <p>January 2026 - February 2026</p>
-                </div>
-                <div class="info-card">
-                    <i class="fas fa-book"></i>
-                    <h4>Course</h4>
-                    <p>Problem Based Learning (PBL)</p>
-                </div>
-                <div class="info-card">
-                    <i class="fas fa-laptop-code"></i>
-                    <h4>Type</h4>
-                    <p>Full Stack Web Application</p>
-                </div>
+            <div class="mt-12 text-sm text-slate-400 space-y-2">
+                <p>Manipal University Jaipur</p>
+                <p>B.Tech Computer Science Engineering • 3rd Year • 6th Semester</p>
+                <p>Email: arkmanimshra@gmail.com</p>
             </div>
-        </div>
-    </section>
+        </section>
+    </main>
 
-    <!-- Features Section -->
-    <section id="features" class="section-features">
-        <div class="container">
-            <div class="section-header" data-aos="fade-up">
-                <span class="section-subtitle">Core Capabilities</span>
-                <h2 class="section-title">Platform Features</h2>
-                <p class="section-description">
-                    Comprehensive features designed for seamless examination experience
-                </p>
-            </div>
-
-            <div class="features-grid">
-                <div class="feature-card" data-aos="fade-up" data-aos-delay="100">
-                    <div class="feature-icon">
-                        <i class="fas fa-robot"></i>
-                    </div>
-                    <h3>AI-Powered Proctoring</h3>
-                    <p>
-                        Advanced face detection and head pose estimation using MediaPipe to monitor student behavior in real-time. 
-                        Detects multiple faces, absence of face, and suspicious head movements with 95% accuracy.
-                    </p>
-                    <ul class="feature-list">
-                        <li>Real-time face detection</li>
-                        <li>Head pose tracking</li>
-                        <li>Multiple person detection</li>
-                        <li>Automated flag generation</li>
-                    </ul>
-                </div>
-
-                <div class="feature-card" data-aos="fade-up" data-aos-delay="200">
-                    <div class="feature-icon">
-                        <i class="fas fa-volume-up"></i>
-                    </div>
-                    <h3>Audio Monitoring</h3>
-                    <p>
-                        Intelligent audio analysis to detect unusual sounds, loud noises, and voice activity during examinations. 
-                        Uses advanced signal processing to identify potential cheating attempts.
-                    </p>
-                    <ul class="feature-list">
-                        <li>Background noise detection</li>
-                        <li>Voice activity analysis</li>
-                        <li>Suspicious sound alerts</li>
-                        <li>RMS energy computation</li>
-                    </ul>
-                </div>
-
-                <div class="feature-card" data-aos="fade-up" data-aos-delay="300">
-                    <div class="feature-icon">
-                        <i class="fas fa-users-cog"></i>
-                    </div>
-                    <h3>Role-Based Access</h3>
-                    <p>
-                        Sophisticated role management system with distinct interfaces for students, examiners, and administrators. 
-                        Each role has tailored permissions and features for optimal workflow.
-                    </p>
-                    <ul class="feature-list">
-                        <li>Student dashboard & exam interface</li>
-                        <li>Examiner control panel</li>
-                        <li>Admin management system</li>
-                        <li>JWT-based authentication</li>
-                    </ul>
-                </div>
-
-                <div class="feature-card" data-aos="fade-up" data-aos-delay="400">
-                    <div class="feature-icon">
-                        <i class="fas fa-chart-line"></i>
-                    </div>
-                    <h3>Advanced Analytics</h3>
-                    <p>
-                        Comprehensive performance analytics with interactive charts and graphs. Track student progress, 
-                        identify learning gaps, and generate detailed reports with topic-wise breakdowns.
-                    </p>
-                    <ul class="feature-list">
-                        <li>Score distribution charts</li>
-                        <li>Topic-wise performance</li>
-                        <li>Leaderboard rankings</li>
-                        <li>CSV data export</li>
-                    </ul>
-                </div>
-
-                <div class="feature-card" data-aos="fade-up" data-aos-delay="500">
-                    <div class="feature-icon">
-                        <i class="fas fa-bolt"></i>
-                    </div>
-                    <h3>Real-Time Experience</h3>
-                    <p>
-                        Lightning-fast exam interface with auto-save functionality, live timer, and instant feedback. 
-                        Optimized for performance with minimal latency and smooth animations.
-                    </p>
-                    <ul class="feature-list">
-                        <li>Auto-save every 10 seconds</li>
-                        <li>Live countdown timer</li>
-                        <li>Instant navigation</li>
-                        <li>Progress tracking</li>
-                    </ul>
-                </div>
-
-                <div class="feature-card" data-aos="fade-up" data-aos-delay="600">
-                    <div class="feature-icon">
-                        <i class="fas fa-check-double"></i>
-                    </div>
-                    <h3>Automated Evaluation</h3>
-                    <p>
-                        Intelligent evaluation engine that automatically grades responses, calculates scores, 
-                        and generates instant results with detailed feedback and topic-wise analysis.
-                    </p>
-                    <ul class="feature-list">
-                        <li>Instant grading</li>
-                        <li>Multiple choice support</li>
-                        <li>Partial marking</li>
-                        <li>Detailed feedback</li>
-                    </ul>
-                </div>
-            </div>
-        </div>
-    </section>
-
-    <!-- Technology Stack Section -->
-    <section id="technology" class="section-technology">
-        <div class="container">
-            <div class="section-header" data-aos="fade-up">
-                <span class="section-subtitle">Built With</span>
-                <h2 class="section-title">Technology Stack</h2>
-                <p class="section-description">
-                    Powered by cutting-edge technologies and modern frameworks
-                </p>
-            </div>
-
-            <div class="tech-categories">
-                <!-- Frontend -->
-                <div class="tech-category" data-aos="fade-up" data-aos-delay="100">
-                    <h3>
-                        <i class="fas fa-desktop"></i>
-                        Frontend
-                    </h3>
-                    <div class="tech-grid">
-                        <div class="tech-item">
-                            <i class="fab fa-react"></i>
-                            <span>React 18</span>
-                        </div>
-                        <div class="tech-item">
-                            <i class="fas fa-code"></i>
-                            <span>TypeScript</span>
-                        </div>
-                        <div class="tech-item">
-                            <i class="fas fa-wind"></i>
-                            <span>Tailwind CSS</span>
-                        </div>
-                        <div class="tech-item">
-                            <i class="fas fa-bolt"></i>
-                            <span>Vite</span>
-                        </div>
-                        <div class="tech-item">
-                            <i class="fas fa-magic"></i>
-                            <span>Framer Motion</span>
-                        </div>
-                        <div class="tech-item">
-                            <i class="fas fa-chart-bar"></i>
-                            <span>Recharts</span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Backend -->
-                <div class="tech-category" data-aos="fade-up" data-aos-delay="200">
-                    <h3>
-                        <i class="fas fa-server"></i>
-                        Backend
-                    </h3>
-                    <div class="tech-grid">
-                        <div class="tech-item">
-                            <i class="fab fa-python"></i>
-                            <span>Python</span>
-                        </div>
-                        <div class="tech-item">
-                            <i class="fas fa-rocket"></i>
-                            <span>FastAPI</span>
-                        </div>
-                        <div class="tech-item">
-                            <i class="fas fa-database"></i>
-                            <span>PostgreSQL</span>
-                        </div>
-                        <div class="tech-item">
-                            <i class="fas fa-layer-group"></i>
-                            <span>SQLAlchemy</span>
-                        </div>
-                        <div class="tech-item">
-                            <i class="fas fa-key"></i>
-                            <span>JWT Auth</span>
-                        </div>
-                        <div class="tech-item">
-                            <i class="fas fa-shield-alt"></i>
-                            <span>Bcrypt</span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- AI/ML -->
-                <div class="tech-category" data-aos="fade-up" data-aos-delay="300">
-                    <h3>
-                        <i class="fas fa-brain"></i>
-                        AI/ML
-                    </h3>
-                    <div class="tech-grid">
-                        <div class="tech-item">
-                            <i class="fas fa-eye"></i>
-                            <span>MediaPipe</span>
-                        </div>
-                        <div class="tech-item">
-                            <i class="fas fa-camera"></i>
-                            <span>OpenCV</span>
-                        </div>
-                        <div class="tech-item">
-                            <i class="fas fa-microchip"></i>
-                            <span>TensorFlow Lite</span>
-                        </div>
-                        <div class="tech-item">
-                            <i class="fas fa-chart-line"></i>
-                            <span>NumPy</span>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- DevOps -->
-                <div class="tech-category" data-aos="fade-up" data-aos-delay="400">
-                    <h3>
-                        <i class="fas fa-tools"></i>
-                        DevOps & Tools
-                    </h3>
-                    <div class="tech-grid">
-                        <div class="tech-item">
-                            <i class="fab fa-docker"></i>
-                            <span>Docker</span>
-                        </div>
-                        <div class="tech-item">
-                            <i class="fab fa-git-alt"></i>
-                            <span>Git</span>
-                        </div>
-                        <div class="tech-item">
-                            <i class="fab fa-github"></i>
-                            <span>GitHub</span>
-                        </div>
-                        <div class="tech-item">
-                            <i class="fas fa-code-branch"></i>
-                            <span>CI/CD</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </section>
-
-    <!-- Gallery Section -->
-    <section id="gallery" class="section-gallery">
-        <div class="container">
-            <div class="section-header" data-aos="fade-up">
-                <span class="section-subtitle">Visual Showcase</span>
-                <h2 class="section-title">Application Screenshots</h2>
-                <p class="section-description">
-                    Explore the intuitive and modern interface of Quizzie
-                </p>
-            </div>
-
-            <div class="gallery-grid">
-                <div class="gallery-item" data-aos="zoom-in" data-aos-delay="100">
-                    <div class="gallery-image">
-                        <img src="images/login.png" alt="Login Page" loading="lazy">
-                        <div class="gallery-overlay">
-                            <h4>Login Interface</h4>
-                            <p>Secure authentication with role-based access</p>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="gallery-item" data-aos="zoom-in" data-aos-delay="200">
-                    <div class="gallery-image">
-                        <img src="images/dashboard.png" alt="Student Dashboard" loading="lazy">
-                        <div class="gallery-overlay">
-                            <h4>Student Dashboard</h4>
-                            <p>Clean interface showing available exams and statistics</p>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="gallery-item" data-aos="zoom-in" data-aos-delay="300">
-                    <div class="gallery-image">
-                        <img src="images/exam.png" alt="Exam Interface" loading="lazy">
-                        <div class="gallery-overlay">
-                            <h4>Exam Taking Interface</h4>
-                            <p>Full-screen exam mode with real-time monitoring</p>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="gallery-item" data-aos="zoom-in" data-aos-delay="400">
-                    <div class="gallery-image">
-                        <img src="images/results.png" alt="Results Page" loading="lazy">
-                        <div class="gallery-overlay">
-                            <h4>Results & Analytics</h4>
-                            <p>Detailed performance breakdown with charts</p>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="gallery-item" data-aos="zoom-in" data-aos-delay="500">
-                    <div class="gallery-image">
-                        <img src="images/analytics.png" alt="Analytics Dashboard" loading="lazy">
-                        <div class="gallery-overlay">
-                            <h4>Analytics Dashboard</h4>
-                            <p>Comprehensive insights and leaderboards</p>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </section>
-
-    <!-- Team Section -->
-    <section id="team" class="section-team">
-        <div class="container">
-            <div class="section-header" data-aos="fade-up">
-                <span class="section-subtitle">Project Contributors</span>
-                <h2 class="section-title">Our Team</h2>
-                <p class="section-description">
-                    Meet the talented individuals behind Quizzie
-                </p>
-            </div>
-
-            <!-- Guide -->
-            <div class="guide-card" data-aos="fade-up" data-aos-delay="100">
-                <div class="guide-icon">
-                    <i class="fas fa-user-tie"></i>
-                </div>
-                <div class="guide-info">
-                    <h3>Mr. Sachin Gupta</h3>
-                    <p class="guide-role">Project Guide</p>
-                    <p class="guide-dept">Department of Computer Science & Engineering</p>
-                    <p class="guide-college">Manipal University Jaipur</p>
-                </div>
-            </div>
-
-            <!-- Team Members -->
-            <div class="team-grid">
-                <div class="team-card" data-aos="fade-up" data-aos-delay="200">
-                    <div class="team-avatar">
-                        <i class="fas fa-user-circle"></i>
-                    </div>
-                    <h3>Ark Mani</h3>
-                    <p class="team-role">Full Stack Developer & AI Integration</p>
-                    <p class="team-reg">23FE10CSE00793</p>
-                    <p class="team-dept">B.Tech CSE, 3rd Year</p>
-                    <div class="team-social">
-                        <a href="mailto:arkmanimshra@gmail.com" target="_blank">
-                            <i class="fas fa-envelope"></i>
-                        </a>
-                        <a href="https://www.linkedin.com/in/ark-mani-924694200/" target="_blank">
-                            <i class="fab fa-linkedin"></i>
-                        </a>
-                        <a href="https://github.com/OnlyArkMani" target="_blank">
-                            <i class="fab fa-github"></i>
-                        </a>
-                    </div>
-                </div>
-
-                <div class="team-card" data-aos="fade-up" data-aos-delay="300">
-                    <div class="team-avatar">
-                        <i class="fas fa-user-circle"></i>
-                    </div>
-                    <h3>Rishabh Jain</h3>
-                    <p class="team-role">Backend Developer & Database Design</p>
-                    <p class="team-reg">23FE10CSE00784</p>
-                    <p class="team-dept">B.Tech CSE, 3rd Year</p>
-                    <div class="team-social">
-                        <a href="mailto:rishabh.jain@example.com" target="_blank">
-                            <i class="fas fa-envelope"></i>
-                        </a>
-                        <a href="#" target="_blank">
-                            <i class="fab fa-linkedin"></i>
-                        </a>
-                        <a href="#" target="_blank">
-                            <i class="fab fa-github"></i>
-                        </a>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </section>
-
-    <!-- Contact Section -->
-    <section id="contact" class="section-contact">
-        <div class="container">
-            <div class="section-header" data-aos="fade-up">
-                <span class="section-subtitle">Get In Touch</span>
-                <h2 class="section-title">Contact Us</h2>
-                <p class="section-description">
-                    Have questions or want to collaborate? Reach out to us!
-                </p>
-            </div>
-
-            <div class="contact-grid">
-                <div class="contact-card" data-aos="fade-up" data-aos-delay="100">
-                    <div class="contact-icon">
-                        <i class="fas fa-envelope"></i>
-                    </div>
-                    <h3>Email</h3>
-                    <a href="mailto:arkmanimshra@gmail.com">arkmanimshra@gmail.com</a>
-                </div>
-
-                <div class="contact-card" data-aos="fade-up" data-aos-delay="200">
-                    <div class="contact-icon">
-                        <i class="fab fa-github"></i>
-                    </div>
-                    <h3>GitHub</h3>
-                    <a href="https://github.com/OnlyArkMani/Quizzie" target="_blank">View Repository</a>
-                </div>
-
-                <div class="contact-card" data-aos="fade-up" data-aos-delay="300">
-                    <div class="contact-icon">
-                        <i class="fab fa-linkedin"></i>
-                    </div>
-                    <h3>LinkedIn</h3>
-                    <a href="https://www.linkedin.com/in/ark-mani-924694200/" target="_blank">Connect with Ark</a>
-                </div>
-
-                <div class="contact-card" data-aos="fade-up" data-aos-delay="400">
-                    <div class="contact-icon">
-                        <i class="fas fa-university"></i>
-                    </div>
-                    <h3>Institution</h3>
-                    <p>Manipal University Jaipur</p>
-                </div>
-            </div>
-        </div>
-    </section>
-
-    <!-- Footer -->
-    <footer class="footer">
-        <div class="container">
-            <div class="footer-content">
-                <div class="footer-brand">
-                    <h3>
-                        <i class="fas fa-graduation-cap"></i>
-                        Quizzie
-                    </h3>
-                    <p>AI-Powered Online Examination Platform</p>
-                    <div class="footer-social">
-                        <a href="https://github.com/OnlyArkMani/Quizzie" target="_blank">
-                            <i class="fab fa-github"></i>
-                        </a>
-                        <a href="https://www.linkedin.com/in/ark-mani-924694200/" target="_blank">
-                            <i class="fab fa-linkedin"></i>
-                        </a>
-                        <a href="mailto:arkmanimshra@gmail.com">
-                            <i class="fas fa-envelope"></i>
-                        </a>
-                    </div>
-                </div>
-
-                <div class="footer-links">
-                    <h4>Quick Links</h4>
-                    <ul>
-                        <li><a href="#home">Home</a></li>
-                        <li><a href="#about">About</a></li>
-                        <li><a href="#features">Features</a></li>
-                        <li><a href="#technology">Technology</a></li>
-                    </ul>
-                </div>
-
-                <div class="footer-links">
-                    <h4>Resources</h4>
-                    <ul>
-                        <li><a href="https://github.com/OnlyArkMani/Quizzie" target="_blank">GitHub Repo</a></li>
-                        <li><a href="https://github.com/OnlyArkMani/Quizzie#readme" target="_blank">Documentation</a></li>
-                        <li><a href="#gallery">Screenshots</a></li>
-                        <li><a href="#team">Team</a></li>
-                    </ul>
-                </div>
-
-                <div class="footer-info">
-                    <h4>Project Info</h4>
-                    <p><i class="fas fa-calendar"></i> Jan 2026 - Feb 2026</p>
-                    <p><i class="fas fa-university"></i> Manipal University Jaipur</p>
-                    <p><i class="fas fa-book"></i> PBL Project</p>
-                </div>
-            </div>
-
-            <div class="footer-bottom">
-                <p>&copy; 2026 Quizzie. All rights reserved.</p>
-                <p>Made with <i class="fas fa-heart"></i> by Ark Mani & Rishabh Jain</p>
-            </div>
-        </div>
+    <!-- FOOTER -->
+    <footer class="py-12 text-center bg-black/40 border-t border-slate-900">
+        <p class="text-slate-600 text-[10px] font-bold tracking-[0.3em] uppercase mb-2">Manipal University Jaipur</p>
+        <p class="text-slate-500 text-[9px] font-medium tracking-[0.2em] uppercase opacity-50">
+            Department of Computer Science & Engineering • 2026
+        </p>
     </footer>
 
-    <!-- Scroll to Top Button -->
-    <button id="scrollTopBtn" class="scroll-top-btn">
-        <i class="fas fa-arrow-up"></i>
-    </button>
+    <script>
+        // TIMER
+        let sec = 0;
+        let timer = null;
+        function startTimer() {
+            timer = setInterval(() => {
+                sec++;
+                let m = Math.floor(sec / 60);
+                let s = sec % 60;
+                document.getElementById('displayTime').innerText = `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 
-    <!-- AOS Animation Library -->
-    <script src="https://unpkg.com/aos@2.3.1/dist/aos.js"></script>
-    
-    <!-- Custom JavaScript -->
-    <script src="js/script.js"></script>
+                if (sec >= 480 && sec < 600) {
+                    document.getElementById('timerContainer').classList.add('timer-warning');
+                    document.getElementById('timerIcon').classList.replace('fa-hourglass-start', 'fa-hourglass-half');
+                } else if (sec >= 600) {
+                    clearInterval(timer);
+                    document.getElementById('timerContainer').classList.replace('timer-warning', 'timer-stop');
+                    document.getElementById('displayTime').innerText = "10:00";
+                    document.getElementById('timerIcon').classList.replace('fa-hourglass-half', 'fa-hourglass-end');
+                }
+            }, 1000);
+        }
+
+        // CHART
+        const ctx = document.getElementById('resultsChart').getContext('2d');
+        new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: ['Conventional Academic System', 'Proposed Web Application'],
+                datasets: [{
+                    data: [70, 92],
+                    backgroundColor: ['#1e293b', '#3b82f6'],
+                    borderRadius: 15,
+                    barThickness: 50
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false } },
+                scales: {
+                    y: { beginAtZero: true, grid: { color: '#ffffff05' }, ticks: { color: '#475569' } },
+                    x: { grid: { display: false }, ticks: { color: '#475569' } }
+                }
+            }
+        });
+    </script>
 </body>
 </html>
