@@ -30,3 +30,4 @@ class Exam(Base):
     # Relationships
     questions = relationship("Question", back_populates="exam", cascade="all, delete-orphan")
     attempts = relationship("ExamAttempt", back_populates="exam")
+    proctoring_settings = relationship("ProctoringSettings", back_populates="exam", uselist=False)
