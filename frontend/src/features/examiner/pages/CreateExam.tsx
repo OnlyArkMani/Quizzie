@@ -2,20 +2,24 @@ import { useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Check } from 'lucide-react';
+
 import { useExaminerStore } from '../store/examinerStore';
 import Step1Details from '../components/ExamWizard/Step1Details';
 import Step2Questions from '../components/ExamWizard/Step2Questions';
 import Step3Settings from '../components/ExamWizard/Step3Settings';
+import ProctoringSettingsPanel from '../components/ProctoringSettingsPanel';
 
 const CreateExam = () => {
   const navigate = useNavigate();
-  const { currentStep, resetDraft } = useExaminerStore();
+
+  const {
+    currentStep,
+    examId, // must be set after Step 1
+  } = useExaminerStore();
 
   useEffect(() => {
-    // Reset draft when component mounts
-    return () => {
-      // Optional: could keep draft for "continue editing" feature
-    };
+    // Intentionally left empty
+    // Draft persistence can be added later
   }, []);
 
   const steps = [
@@ -37,8 +41,12 @@ const CreateExam = () => {
           >
             ← Back to Dashboard
           </button>
-          <h1 className="text-3xl font-bold text-slate-900">Create New Exam</h1>
-          <p className="text-slate-600 mt-2">Follow the steps to create your exam</p>
+          <h1 className="text-3xl font-bold text-slate-900">
+            Create New Exam
+          </h1>
+          <p className="text-slate-600 mt-2">
+            Follow the steps to create your exam
+          </p>
         </div>
 
         {/* Progress Steps */}
@@ -65,7 +73,9 @@ const CreateExam = () => {
                     ) : (
                       <span
                         className={`font-semibold ${
-                          currentStep === step.number ? 'text-white' : 'text-slate-600'
+                          currentStep === step.number
+                            ? 'text-white'
+                            : 'text-slate-600'
                         }`}
                       >
                         {step.number}
@@ -77,7 +87,9 @@ const CreateExam = () => {
                   <div className="ml-3">
                     <p
                       className={`text-sm font-medium ${
-                        currentStep >= step.number ? 'text-slate-900' : 'text-slate-500'
+                        currentStep >= step.number
+                          ? 'text-slate-900'
+                          : 'text-slate-500'
                       }`}
                     >
                       {step.title}
@@ -91,7 +103,10 @@ const CreateExam = () => {
                     <motion.div
                       initial={false}
                       animate={{
-                        backgroundColor: currentStep > step.number ? '#10b981' : '#e2e8f0',
+                        backgroundColor:
+                          currentStep > step.number
+                            ? '#10b981'
+                            : '#e2e8f0',
                       }}
                       className="h-1 rounded-full"
                     />
@@ -111,6 +126,24 @@ const CreateExam = () => {
           transition={{ duration: 0.3 }}
         >
           <CurrentStepComponent />
+
+          {/* Step 3: Proctoring Settings */}
+          {currentStep === 3 && examId && (
+            <div className="mt-8">
+              <ProctoringSettingsPanel
+                examId={examId}
+                onSave={(settings) => {
+                  console.log(
+                    'Proctoring settings saved:',
+                    settings
+                  );
+                  // Optional:
+                  // - show success toast
+                  // - enable Publish button
+                }}
+              />
+            </div>
+          )}
         </motion.div>
       </div>
     </div>
