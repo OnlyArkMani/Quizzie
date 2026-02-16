@@ -1,3 +1,42 @@
+/* ================================
+   Proctoring & Monitoring Types
+================================ */
+
+export interface ProctoringSettings {
+  camera_enabled: boolean;
+  microphone_enabled: boolean;
+  face_detection_enabled: boolean;
+  multiple_face_detection: boolean;
+  head_pose_detection: boolean;
+  tab_switch_detection: boolean;
+  min_face_confidence: number;
+  max_head_rotation: number;
+  detection_interval: number;
+  initial_health: number;
+  auto_submit_on_zero_health: boolean;
+  health_warning_threshold: number;
+}
+
+export interface HealthStatus {
+  current: number;
+  max: number;
+  percentage: number;
+  status: 'good' | 'warning' | 'critical' | 'failed';
+  violations_count: number;
+}
+
+export interface ViolationFlag {
+  type: string;
+  severity: 'low' | 'medium' | 'high';
+  message: string;
+  timestamp: string;
+  metadata?: Record<string, any>;
+}
+
+/* ================================
+   Core Domain Types
+================================ */
+
 export interface User {
   id: string;
   email: string;
@@ -84,11 +123,14 @@ export interface AnalyticsSummary {
   highest_score: number;
   lowest_score: number;
   pass_percentage: number;
-  topic_wise_stats: Record<string, {
-    correct: number;
-    total: number;
-    percentage: number;
-  }>;
+  topic_wise_stats: Record<
+    string,
+    {
+      correct: number;
+      total: number;
+      percentage: number;
+    }
+  >;
 }
 
 export interface LeaderboardEntry {
