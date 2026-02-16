@@ -25,6 +25,7 @@ const ExamLobby = () => {
   const [micAccessGranted, setMicAccessGranted] = useState(false);
 
   const [starting, setStarting] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   useEffect(() => {
     if (!examId) return;
@@ -32,7 +33,6 @@ const ExamLobby = () => {
     checkPermissions();
   }, [examId]);
 
-  // ✅ Fetch exam safely
   const fetchExamDetails = async () => {
     try {
       const response = await api.get(`/exams/${examId}`);
@@ -42,12 +42,12 @@ const ExamLobby = () => {
         'Failed to fetch exam:',
         error?.response?.data || error.message
       );
+      setErrorMessage('Failed to load exam details');
     } finally {
       setLoading(false);
     }
   };
 
-  // ✅ Camera & mic permission check
   const checkPermissions = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -58,7 +58,6 @@ const ExamLobby = () => {
       setCameraAccessGranted(true);
       setMicAccessGranted(true);
 
-      // stop camera after check
       stream.getTracks().forEach((track) => track.stop());
     } catch (error) {
       console.error('Permission denied:', error);
@@ -67,11 +66,11 @@ const ExamLobby = () => {
     }
   };
 
-  // ✅ Start exam + guaranteed attemptId passing
   const handleStartExam = async () => {
     if (!cameraAccessGranted || !agreedToTerms || !examId) return;
 
     setStarting(true);
+    setErrorMessage(null);
 
     try {
       const response = await api.post('/attempts/start', {
@@ -90,13 +89,20 @@ const ExamLobby = () => {
         'Failed to start exam:',
         error?.response?.data || error.message
       );
-      alert('Failed to start exam. Please try again.');
+      
+      const errorDetail = error?.response?.data?.detail;
+      
+      // ✅ Handle "already attempted" error
+      if (errorDetail === 'You have already attempted this exam') {
+        setErrorMessage('You have already taken this exam. Please check your results in the dashboard.');
+      } else {
+        setErrorMessage(errorDetail || 'Failed to start exam. Please try again.');
+      }
     } finally {
       setStarting(false);
     }
   };
 
-  // ✅ Loading UI
   if (loading) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
@@ -105,11 +111,18 @@ const ExamLobby = () => {
     );
   }
 
-  // ✅ Exam not found
   if (!exam) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
-        <p className="text-slate-600">Exam not found</p>
+        <div className="text-center">
+          <p className="text-slate-600 mb-4">Exam not found</p>
+          <button
+            onClick={() => navigate('/student')}
+            className="px-6 py-2 bg-indigo-600 text-white rounded-lg"
+          >
+            Back to Dashboard
+          </button>
+        </div>
       </div>
     );
   }
@@ -128,6 +141,27 @@ const ExamLobby = () => {
             </h1>
             <p className="text-slate-600">{exam.description}</p>
           </div>
+
+          {/* Error Message */}
+          {errorMessage && (
+            <div className="mb-6 p-4 bg-rose-50 border border-rose-200 rounded-lg">
+              <div className="flex items-start gap-3">
+                <AlertTriangle className="w-5 h-5 text-rose-600 flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-semibold text-rose-900">Error</p>
+                  <p className="text-sm text-rose-700 mt-1">{errorMessage}</p>
+                  {errorMessage.includes('already taken') && (
+                    <button
+                      onClick={() => navigate('/student')}
+                      className="mt-3 text-sm text-rose-600 hover:text-rose-700 underline"
+                    >
+                      Go to Dashboard
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Exam Details */}
           <div className="grid grid-cols-2 gap-4 mb-8">
@@ -154,7 +188,6 @@ const ExamLobby = () => {
 
           {/* Permissions */}
           <div className="mb-8 space-y-3">
-            {/* Camera */}
             <div className={`flex items-center gap-3 p-4 rounded-lg border ${
               cameraAccessGranted
                 ? 'bg-emerald-50 border-emerald-200'
@@ -169,7 +202,6 @@ const ExamLobby = () => {
               {cameraAccessGranted && <Check className="w-5 h-5 text-emerald-600" />}
             </div>
 
-            {/* Mic */}
             <div className={`flex items-center gap-3 p-4 rounded-lg border ${
               micAccessGranted
                 ? 'bg-emerald-50 border-emerald-200'
