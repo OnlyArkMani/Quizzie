@@ -1,10 +1,10 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { 
-  Heart, 
-  AlertTriangle, 
-  Eye, 
-  Users, 
+import {
+  Heart,
+  AlertTriangle,
+  Eye,
+  Users,
   Activity,
   ShieldAlert,
   CheckCircle,
@@ -32,10 +32,10 @@ interface HealthBarProps {
   showViolations?: boolean;
 }
 
-const HealthBar: React.FC<HealthBarProps> = ({ 
-  attemptId, 
+const HealthBar: React.FC<HealthBarProps> = ({
+  attemptId,
   onHealthZero,
-  showViolations = true 
+  showViolations = true
 }) => {
   const [health, setHealth] = useState<HealthStatus>({
     current: 100,
@@ -46,65 +46,76 @@ const HealthBar: React.FC<HealthBarProps> = ({
   });
 
   const [recentViolations, setRecentViolations] = useState<Violation[]>([]);
-  const [ws, setWs] = useState<WebSocket | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [showAlert, setShowAlert] = useState(false);
 
   // WebSocket connection for real-time updates
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//${window.location.hostname}:8000/api/v1/monitor/ws/proctoring/${attemptId}`;
-    
-    const websocket = new WebSocket(wsUrl);
+    const host = window.location.hostname;
 
-    websocket.onopen = () => {
-      console.log('Proctoring WebSocket connected');
-      setIsConnected(true);
-    };
+    // FIX Bug 7: Correct WS path — backend mounts enhanced_monitoring at
+    // /api/v1/monitor/enhanced, so the WS endpoint is:
+    // /api/v1/monitor/enhanced/ws/proctoring/{attempt_id}
+    const wsUrl = `${protocol}//${host}:8000/api/v1/monitor/enhanced/ws/proctoring/${attemptId}`;
 
-    websocket.onmessage = (event) => {
-      const data = JSON.parse(event.data);
+    let websocket: WebSocket;
+    let reconnectTimeout: NodeJS.Timeout;
 
-      if (data.type === 'health_update') {
-        const newHealth = data.data as HealthStatus;
-        setHealth(newHealth);
+    const connect = () => {
+      websocket = new WebSocket(wsUrl);
 
-        // Trigger alert if health is low
-        if (newHealth.percentage <= 40 && newHealth.percentage > 0) {
-          setShowAlert(true);
-          setTimeout(() => setShowAlert(false), 3000);
+      websocket.onopen = () => {
+        console.log('✅ Proctoring WebSocket connected');
+        setIsConnected(true);
+      };
+
+      websocket.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+
+          if (data.type === 'health_update') {
+            const newHealth = data.data as HealthStatus;
+            setHealth(newHealth);
+
+            if (newHealth.percentage <= 40 && newHealth.percentage > 0) {
+              setShowAlert(true);
+              setTimeout(() => setShowAlert(false), 3000);
+            }
+
+            if (newHealth.percentage <= 0 && onHealthZero) {
+              onHealthZero();
+            }
+          }
+
+          if (data.type === 'violation_alert') {
+            const violation = data.data as Violation;
+            setRecentViolations(prev => [violation, ...prev].slice(0, 5));
+          }
+        } catch (e) {
+          console.error('WS message parse error:', e);
         }
+      };
 
-        // Call onHealthZero callback
-        if (newHealth.percentage <= 0 && onHealthZero) {
-          onHealthZero();
-        }
-      }
+      websocket.onerror = () => {
+        setIsConnected(false);
+      };
 
-      if (data.type === 'violation_alert') {
-        const violation = data.data as Violation;
-        setRecentViolations(prev => [violation, ...prev].slice(0, 5));
-      }
+      websocket.onclose = () => {
+        setIsConnected(false);
+        // Auto-reconnect after 5 seconds
+        reconnectTimeout = setTimeout(connect, 5000);
+      };
     };
 
-    websocket.onerror = (error) => {
-      console.error('WebSocket error:', error);
-      setIsConnected(false);
-    };
-
-    websocket.onclose = () => {
-      console.log('WebSocket disconnected');
-      setIsConnected(false);
-    };
-
-    setWs(websocket);
+    connect();
 
     return () => {
-      websocket.close();
+      clearTimeout(reconnectTimeout);
+      websocket?.close();
     };
   }, [attemptId, onHealthZero]);
 
-  // Get color based on health status
   const getHealthColor = useCallback(() => {
     if (health.percentage > 70) return 'bg-emerald-500';
     if (health.percentage > 40) return 'bg-amber-500';
@@ -121,31 +132,21 @@ const HealthBar: React.FC<HealthBarProps> = ({
 
   const getStatusIcon = useCallback(() => {
     switch (health.status) {
-      case 'good':
-        return <CheckCircle className="w-5 h-5 text-emerald-500" />;
-      case 'warning':
-        return <AlertTriangle className="w-5 h-5 text-amber-500" />;
-      case 'critical':
-        return <ShieldAlert className="w-5 h-5 text-rose-500" />;
-      case 'failed':
-        return <XCircle className="w-5 h-5 text-gray-500" />;
-      default:
-        return <Activity className="w-5 h-5" />;
+      case 'good': return <CheckCircle className="w-5 h-5 text-emerald-500" />;
+      case 'warning': return <AlertTriangle className="w-5 h-5 text-amber-500" />;
+      case 'critical': return <ShieldAlert className="w-5 h-5 text-rose-500" />;
+      case 'failed': return <XCircle className="w-5 h-5 text-gray-500" />;
+      default: return <Activity className="w-5 h-5" />;
     }
   }, [health.status]);
 
   const getViolationIcon = (type: string) => {
     switch (type) {
       case 'no_face':
-        return <Eye className="w-4 h-4" />;
-      case 'multiple_faces':
-        return <Users className="w-4 h-4" />;
-      case 'looking_away':
-        return <Eye className="w-4 h-4" />;
-      case 'tab_switch':
-        return <Activity className="w-4 h-4" />;
-      default:
-        return <AlertTriangle className="w-4 h-4" />;
+      case 'looking_away': return <Eye className="w-4 h-4" />;
+      case 'multiple_faces': return <Users className="w-4 h-4" />;
+      case 'tab_switch': return <Activity className="w-4 h-4" />;
+      default: return <AlertTriangle className="w-4 h-4" />;
     }
   };
 
@@ -154,7 +155,7 @@ const HealthBar: React.FC<HealthBarProps> = ({
       {/* Connection Status */}
       <div className="mb-2 flex items-center justify-end gap-2 text-xs">
         <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-500' : 'bg-rose-500'} animate-pulse`} />
-        <span className="text-slate-600">
+        <span className="text-slate-400">
           {isConnected ? 'Monitoring Active' : 'Reconnecting...'}
         </span>
       </div>
@@ -165,7 +166,6 @@ const HealthBar: React.FC<HealthBarProps> = ({
         animate={{ opacity: 1, y: 0 }}
         className="bg-white rounded-xl shadow-lg border border-slate-200 p-4"
       >
-        {/* Header */}
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
             <Heart className={`w-5 h-5 ${getHealthTextColor()}`} />
@@ -174,13 +174,12 @@ const HealthBar: React.FC<HealthBarProps> = ({
           {getStatusIcon()}
         </div>
 
-        {/* Health Bar */}
         <div className="relative">
           <div className="w-full h-8 bg-slate-100 rounded-full overflow-hidden">
             <motion.div
               className={`h-full ${getHealthColor()} flex items-center justify-end pr-3`}
               initial={{ width: '100%' }}
-              animate={{ width: `${health.percentage}%` }}
+              animate={{ width: `${Math.max(health.percentage, 0)}%` }}
               transition={{ duration: 0.5, ease: 'easeOut' }}
             >
               <span className="text-xs font-bold text-white drop-shadow">
@@ -189,7 +188,6 @@ const HealthBar: React.FC<HealthBarProps> = ({
             </motion.div>
           </div>
 
-          {/* Percentage */}
           <div className="flex items-center justify-between mt-2">
             <span className={`text-2xl font-bold ${getHealthTextColor()}`}>
               {health.percentage.toFixed(0)}%
@@ -200,7 +198,6 @@ const HealthBar: React.FC<HealthBarProps> = ({
           </div>
         </div>
 
-        {/* Violations Count */}
         <div className="mt-4 pt-4 border-t border-slate-100">
           <div className="flex items-center justify-between text-sm">
             <span className="text-slate-600">Total Violations</span>
@@ -210,7 +207,6 @@ const HealthBar: React.FC<HealthBarProps> = ({
           </div>
         </div>
 
-        {/* Health Thresholds Legend */}
         <div className="mt-3 pt-3 border-t border-slate-100 space-y-1 text-xs">
           <div className="flex items-center gap-2">
             <div className="w-3 h-3 bg-emerald-500 rounded" />
@@ -218,7 +214,7 @@ const HealthBar: React.FC<HealthBarProps> = ({
           </div>
           <div className="flex items-center gap-2">
             <div className="w-3 h-3 bg-amber-500 rounded" />
-            <span className="text-slate-600">Warning (40-70%)</span>
+            <span className="text-slate-600">Warning (40–70%)</span>
           </div>
           <div className="flex items-center gap-2">
             <div className="w-3 h-3 bg-rose-500 rounded" />
@@ -227,7 +223,7 @@ const HealthBar: React.FC<HealthBarProps> = ({
         </div>
       </motion.div>
 
-      {/* Recent Violations (Optional) */}
+      {/* Recent Violations */}
       {showViolations && recentViolations.length > 0 && (
         <motion.div
           initial={{ opacity: 0, y: -10 }}
@@ -289,7 +285,7 @@ const HealthBar: React.FC<HealthBarProps> = ({
         )}
       </AnimatePresence>
 
-      {/* Zero Health - Exam Auto-Submit */}
+      {/* Zero Health */}
       <AnimatePresence>
         {health.percentage <= 0 && (
           <motion.div
