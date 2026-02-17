@@ -18,28 +18,31 @@ from app.models.user import User
 from app.models.attempt import ExamAttempt
 from app.models.cheat_log import CheatLog
 from app.models.exam import Exam
+# FIX Bug 2: Import with alias to avoid name conflict with Pydantic schema below
+from app.models.proctoring_settings import ProctoringSettings as ProctoringSettingsModel
 
 router = APIRouter()
+
 
 # WebSocket connection manager for real-time updates
 class ConnectionManager:
     """Manages WebSocket connections for real-time proctoring"""
-    
+
     def __init__(self):
         self.active_connections: Dict[str, WebSocket] = {}
         self.attempt_health: Dict[str, int] = {}
-        
+
     async def connect(self, attempt_id: str, websocket: WebSocket):
         await websocket.accept()
         self.active_connections[attempt_id] = websocket
         self.attempt_health[attempt_id] = 100  # Initial health
-        
+
     def disconnect(self, attempt_id: str):
         if attempt_id in self.active_connections:
             del self.active_connections[attempt_id]
         if attempt_id in self.attempt_health:
             del self.attempt_health[attempt_id]
-    
+
     async def send_health_update(self, attempt_id: str, health_data: dict):
         if attempt_id in self.active_connections:
             try:
@@ -47,9 +50,9 @@ class ConnectionManager:
                     "type": "health_update",
                     "data": health_data
                 })
-            except:
+            except Exception:
                 self.disconnect(attempt_id)
-    
+
     async def send_violation_alert(self, attempt_id: str, violation: dict):
         if attempt_id in self.active_connections:
             try:
@@ -57,14 +60,18 @@ class ConnectionManager:
                     "type": "violation_alert",
                     "data": violation
                 })
-            except:
+            except Exception:
                 self.disconnect(attempt_id)
+
 
 manager = ConnectionManager()
 
 
-# Pydantic schemas
-class ProctoringSettings(BaseModel):
+# ─── Pydantic Schemas ────────────────────────────────────────────────────────
+
+# FIX Bug 2: Renamed from ProctoringSettings → ExamProctoringConfig to avoid
+#            conflict with the SQLAlchemy model imported above.
+class ExamProctoringConfig(BaseModel):
     """Proctoring configuration settings for an exam"""
     camera_enabled: bool = True
     microphone_enabled: bool = False
@@ -107,84 +114,93 @@ class ProctoringEvent(BaseModel):
     frame_data: Optional[str] = None  # Base64 encoded image
 
 
-class ExamWithProctoring(BaseModel):
-    """Exam model with proctoring settings"""
-    id: UUID
-    title: str
-    proctoring_settings: ProctoringSettings
-    
-    class Config:
-        from_attributes = True
-
-
-# API Endpoints
+# ─── API Endpoints ────────────────────────────────────────────────────────────
 
 @router.post("/exam/{exam_id}/proctoring-settings")
 async def update_proctoring_settings(
     exam_id: UUID,
-    settings: ProctoringSettings,
+    # FIX Bug 2: Use renamed Pydantic schema
+    settings: ExamProctoringConfig,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Update proctoring settings for an exam (Examiner only)
-    """
-    # Check if user is examiner/admin
+    """Update proctoring settings for an exam (Examiner only)"""
     if current_user.role not in ['examiner', 'admin']:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only examiners can update proctoring settings"
         )
-    
-    # Get exam
+
     exam = db.query(Exam).filter(Exam.id == exam_id).first()
     if not exam:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Exam not found"
-        )
-    
-    # Check ownership
-    if exam.created_by != current_user.id and current_user.role != 'admin':
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found")
+
+    if str(exam.created_by) != str(current_user.id) and current_user.role != 'admin':
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You don't have permission to modify this exam"
         )
-    
-    # Store settings in exam metadata (you may need to add a JSONB column to exams table)
-    # For now, we'll store it in a separate table or use exam description temporarily
-    # In production, add: proctoring_settings = Column(JSONB, nullable=True) to Exam model
-    
-    # This is a simplified version - you should add proctoring_settings column to Exam model
-    exam.description = json.dumps(settings.dict()) if not exam.description else exam.description
-    
+
+    # Upsert proctoring settings row
+    ps = db.query(ProctoringSettingsModel).filter(
+        ProctoringSettingsModel.exam_id == exam_id
+    ).first()
+
+    if ps is None:
+        ps = ProctoringSettingsModel(exam_id=exam_id)
+        db.add(ps)
+
+    ps.camera_enabled = settings.camera_enabled
+    ps.microphone_enabled = settings.microphone_enabled
+    ps.face_detection_enabled = settings.face_detection_enabled
+    ps.multiple_face_detection = settings.multiple_face_detection
+    ps.head_pose_detection = settings.head_pose_detection
+    ps.tab_switch_detection = settings.tab_switch_detection
+    ps.min_face_confidence = settings.min_face_confidence
+    ps.max_head_rotation = settings.max_head_rotation
+    ps.detection_interval = settings.detection_interval
+    ps.initial_health = settings.initial_health
+    ps.health_warning_threshold = settings.health_warning_threshold
+    ps.auto_submit_on_zero_health = settings.auto_submit_on_zero_health
+
     db.commit()
-    
-    return {
-        "message": "Proctoring settings updated successfully",
-        "settings": settings
-    }
+
+    return {"message": "Proctoring settings updated successfully", "settings": settings}
 
 
-@router.get("/exam/{exam_id}/proctoring-settings", response_model=ProctoringSettings)
+@router.get("/exam/{exam_id}/proctoring-settings", response_model=ExamProctoringConfig)
 async def get_proctoring_settings(
     exam_id: UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Get proctoring settings for an exam
-    """
+    """Get proctoring settings for an exam"""
     exam = db.query(Exam).filter(Exam.id == exam_id).first()
     if not exam:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Exam not found"
-        )
-    
-    # Return default settings for now
-    # In production, retrieve from exam.proctoring_settings column
-    return ProctoringSettings()
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found")
+
+    ps = db.query(ProctoringSettingsModel).filter(
+        ProctoringSettingsModel.exam_id == exam_id
+    ).first()
+
+    if ps is None:
+        # Return defaults if no custom settings stored yet
+        return ExamProctoringConfig()
+
+    return ExamProctoringConfig(
+        camera_enabled=ps.camera_enabled,
+        microphone_enabled=ps.microphone_enabled,
+        face_detection_enabled=ps.face_detection_enabled,
+        multiple_face_detection=ps.multiple_face_detection,
+        head_pose_detection=ps.head_pose_detection,
+        tab_switch_detection=ps.tab_switch_detection,
+        min_face_confidence=float(ps.min_face_confidence),
+        max_head_rotation=float(ps.max_head_rotation),
+        detection_interval=ps.detection_interval,
+        initial_health=ps.initial_health,
+        health_warning_threshold=ps.health_warning_threshold,
+        auto_submit_on_zero_health=ps.auto_submit_on_zero_health,
+    )
 
 
 @router.post("/violation")
@@ -193,50 +209,47 @@ async def report_violation(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Report a proctoring violation and update health
-    """
-    # Verify attempt exists and belongs to current user
+    """Report a proctoring violation and update health"""
     attempt = db.query(ExamAttempt).filter(
         ExamAttempt.id == event.attempt_id,
         ExamAttempt.student_id == current_user.id
     ).first()
-    
+
     if not attempt:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Exam attempt not found"
-        )
-    
-    # Get exam and proctoring settings
-    exam = db.query(Exam).filter(Exam.id == attempt.exam_id).first()
-    settings = ProctoringSettings()  # Load from exam in production
-    
-    # Calculate health penalties
-    health_calculator = HealthCalculator(settings.initial_health)
-    
-    # Get current health from attempt metadata (or separate table)
-    current_health = getattr(attempt, 'current_health', settings.initial_health)
-    health_calculator.current_health = current_health
-    
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Exam attempt not found")
+
+    # Load proctoring settings
+    ps = db.query(ProctoringSettingsModel).filter(
+        ProctoringSettingsModel.exam_id == attempt.exam_id
+    ).first()
+    cfg = ExamProctoringConfig(
+        initial_health=ps.initial_health if ps else 100,
+        health_warning_threshold=ps.health_warning_threshold if ps else 40,
+        auto_submit_on_zero_health=ps.auto_submit_on_zero_health if ps else True,
+    )
+
+    health_calculator = HealthCalculator(cfg.initial_health)
+
+    # Reconstruct current health from existing violations
+    existing = db.query(CheatLog).filter(CheatLog.attempt_id == event.attempt_id).all()
+    for v in existing:
+        health_calculator.apply_violation(v.flag_type, str(v.severity).replace('CheatSeverity.', ''))
+
     violation_logs = []
-    health_updates = []
-    
-    # Process each flag
+
     for flag in event.flags:
-        # Apply health penalty
-        new_health = health_calculator.apply_violation(
+        health_calculator.apply_violation(
             flag['type'],
             flag.get('severity', 'medium')
         )
-        
-        # Create cheat log
+
+        # FIX Bug 1: Use meta_data (not metadata)
         cheat_log = CheatLog(
             attempt_id=attempt.id,
             flag_type=flag['type'],
             severity=flag.get('severity', 'medium'),
             timestamp=event.timestamp,
-            metadata={
+            meta_data={
                 'message': flag.get('message'),
                 'event_type': event.event_type,
                 **flag.get('metadata', {})
@@ -244,35 +257,30 @@ async def report_violation(
         )
         db.add(cheat_log)
         violation_logs.append(cheat_log)
-        
-        # Increment cheating flags counter
-        attempt.cheating_flags += 1
-    
-    # Update attempt health (you may need to add current_health column)
-    # attempt.current_health = health_calculator.current_health
-    
-    # Check if health is zero and auto-submit is enabled
-    if health_calculator.current_health <= 0 and settings.auto_submit_on_zero_health:
+        attempt.cheating_flags = (attempt.cheating_flags or 0) + 1
+
+    auto_submitted = False
+    if health_calculator.current_health <= 0 and cfg.auto_submit_on_zero_health:
         attempt.status = 'submitted'
         attempt.submitted_at = datetime.utcnow()
-    
+        auto_submitted = True
+
     db.commit()
-    
-    # Send real-time update via WebSocket
+
     health_status = health_calculator.get_health_status()
     await manager.send_health_update(str(event.attempt_id), health_status)
-    
-    # Send violation alert
-    if health_status['percentage'] <= settings.health_warning_threshold:
+
+    if health_status['percentage'] <= cfg.health_warning_threshold:
         await manager.send_violation_alert(str(event.attempt_id), {
             'message': f"⚠️ Health is at {health_status['percentage']:.0f}%",
-            'severity': 'high'
+            'severity': 'high',
+            'timestamp': datetime.utcnow().isoformat()
         })
-    
+
     return {
         "health": health_status,
         "violations_logged": len(violation_logs),
-        "auto_submitted": health_calculator.current_health <= 0 and settings.auto_submit_on_zero_health
+        "auto_submitted": auto_submitted
     }
 
 
@@ -282,36 +290,29 @@ async def get_attempt_health(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Get current health status for an attempt
-    """
+    """Get current health status for an attempt"""
     attempt = db.query(ExamAttempt).filter(ExamAttempt.id == attempt_id).first()
-    
+
     if not attempt:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Attempt not found"
-        )
-    
-    # Check permissions
-    if current_user.role == 'student' and attempt.student_id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied"
-        )
-    
-    # Get violation count and calculate health
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attempt not found")
+
+    if current_user.role == 'student' and str(attempt.student_id) != str(current_user.id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+
+    ps = db.query(ProctoringSettingsModel).filter(
+        ProctoringSettingsModel.exam_id == attempt.exam_id
+    ).first()
+    initial_health = ps.initial_health if ps else 100
+
     violations = db.query(CheatLog).filter(CheatLog.attempt_id == attempt_id).all()
-    
-    # Reconstruct health from violations
-    health_calculator = HealthCalculator(initial_health=100)
-    
-    for violation in violations:
+    health_calculator = HealthCalculator(initial_health=initial_health)
+
+    for v in violations:
         health_calculator.apply_violation(
-            violation.flag_type,
-            violation.severity
+            v.flag_type,
+            str(v.severity).replace('CheatSeverity.', '')
         )
-    
+
     return health_calculator.get_health_status()
 
 
@@ -321,46 +322,35 @@ async def get_attempt_violations(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Get all violations for an attempt (Examiner view)
-    """
+    """Get all violations for an attempt"""
     attempt = db.query(ExamAttempt).filter(ExamAttempt.id == attempt_id).first()
-    
+
     if not attempt:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Attempt not found"
-        )
-    
-    # Check permissions
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attempt not found")
+
     exam = db.query(Exam).filter(Exam.id == attempt.exam_id).first()
+
     if current_user.role == 'student':
-        if attempt.student_id != current_user.id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied"
-            )
+        if str(attempt.student_id) != str(current_user.id):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
     elif current_user.role == 'examiner':
-        if exam.created_by != current_user.id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied"
-            )
-    
+        if str(exam.created_by) != str(current_user.id):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+
     violations = db.query(CheatLog).filter(
         CheatLog.attempt_id == attempt_id
     ).order_by(CheatLog.timestamp.desc()).all()
-    
-    # Group by type
+
     violations_by_type = defaultdict(list)
     for v in violations:
         violations_by_type[v.flag_type].append({
             'id': str(v.id),
-            'severity': v.severity,
+            'severity': str(v.severity),
             'timestamp': v.timestamp.isoformat(),
-            'metadata': v.metadata
+            # FIX Bug 8: Use meta_data (not metadata)
+            'metadata': v.meta_data
         })
-    
+
     return {
         'total_violations': len(violations),
         'by_type': dict(violations_by_type),
@@ -368,47 +358,40 @@ async def get_attempt_violations(
             {
                 'id': str(v.id),
                 'type': v.flag_type,
-                'severity': v.severity,
+                'severity': str(v.severity),
                 'timestamp': v.timestamp.isoformat(),
-                'metadata': v.metadata
+                # FIX Bug 8: Use meta_data (not metadata)
+                'metadata': v.meta_data
             }
             for v in violations
         ]
     }
 
 
-# WebSocket endpoint for real-time monitoring
+# ─── WebSocket ────────────────────────────────────────────────────────────────
+
 @router.websocket("/ws/proctoring/{attempt_id}")
 async def proctoring_websocket(
     websocket: WebSocket,
     attempt_id: str,
     db: Session = Depends(get_db)
 ):
-    """
-    WebSocket endpoint for real-time proctoring updates
-    """
+    """WebSocket endpoint for real-time proctoring updates"""
     await manager.connect(attempt_id, websocket)
-    
+
     try:
-        # Send initial health status
         await websocket.send_json({
             "type": "connected",
             "message": "Proctoring monitoring active",
             "attempt_id": attempt_id
         })
-        
+
         while True:
-            # Receive messages from client
             data = await websocket.receive_json()
-            
-            # Handle different message types
+
             if data.get('type') == 'ping':
                 await websocket.send_json({'type': 'pong'})
-            
-            elif data.get('type') == 'frame_data':
-                # Process frame data (you can add ML analysis here)
-                pass
-            
+
     except WebSocketDisconnect:
         manager.disconnect(attempt_id)
     except Exception as e:
@@ -416,10 +399,11 @@ async def proctoring_websocket(
         manager.disconnect(attempt_id)
 
 
-# Helper class (same as in face detector)
+# ─── Helper ───────────────────────────────────────────────────────────────────
+
 class HealthCalculator:
     """Calculate health decrease based on violations"""
-    
+
     PENALTIES = {
         'no_face': 10,
         'multiple_faces': 15,
@@ -427,47 +411,45 @@ class HealthCalculator:
         'face_tracking_lost': 5,
         'tab_switch': 8,
         'suspicious_audio': 3,
-        'excessive_movement': 2
+        'excessive_movement': 2,
+        'no_face_detected': 10,
+        'multiple_faces_detected': 15,
     }
-    
+
     def __init__(self, initial_health: int = 100):
         self.initial_health = initial_health
         self.current_health = initial_health
         self.violation_history = []
-        
+
     def apply_violation(self, violation_type: str, severity: str = 'medium') -> int:
         base_penalty = self.PENALTIES.get(violation_type, 5)
         severity_multiplier = {'low': 0.5, 'medium': 1.0, 'high': 1.5}
         penalty = int(base_penalty * severity_multiplier.get(severity, 1.0))
-        
         self.current_health = max(0, self.current_health - penalty)
-        
         self.violation_history.append({
             'type': violation_type,
             'severity': severity,
             'penalty': penalty,
             'health_after': self.current_health,
-            'timestamp': datetime.utcnow()
         })
-        
         return self.current_health
-    
-    def get_health_status(self) -> Dict[str, any]:
-        health_percentage = (self.current_health / self.initial_health) * 100
-        
+
+    def get_health_status(self) -> Dict:
+        health_percentage = (self.current_health / self.initial_health) * 100 if self.initial_health > 0 else 0
+
         if health_percentage > 70:
-            status = 'good'
+            s = 'good'
         elif health_percentage > 40:
-            status = 'warning'
+            s = 'warning'
         elif health_percentage > 0:
-            status = 'critical'
+            s = 'critical'
         else:
-            status = 'failed'
-        
+            s = 'failed'
+
         return {
             'current': self.current_health,
             'max': self.initial_health,
             'percentage': health_percentage,
-            'status': status,
+            'status': s,
             'violations_count': len(self.violation_history)
         }
