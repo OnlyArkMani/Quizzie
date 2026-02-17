@@ -41,6 +41,7 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
   settings,
   onViolation
 }) => {
+  // FIX Bug 11: Only ONE videoRef used for both preview and hidden mode
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -63,19 +64,13 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
           type: 'tab_switch',
           severity: 'high',
           message: 'Student switched to another tab or window',
-          metadata: {
-            timestamp: new Date().toISOString(),
-            hidden_duration: 0
-          }
+          metadata: { timestamp: new Date().toISOString() }
         });
       }
     };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
-
-    return () => {
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-    };
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
   }, [isActive, settings.camera_enabled]);
 
   // Initialize camera
@@ -84,12 +79,8 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
       stopCamera();
       return;
     }
-
     startCamera();
-
-    return () => {
-      stopCamera();
-    };
+    return () => stopCamera();
   }, [isActive, settings.camera_enabled]);
 
   // Start detection loop
@@ -102,13 +93,11 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
       return;
     }
 
-    // Start periodic detection
-    const interval = settings.detection_interval * 1000; // Convert to ms
+    const interval = settings.detection_interval * 1000;
     detectionIntervalRef.current = setInterval(() => {
       captureAndAnalyzeFrame();
     }, interval);
 
-    // Also run initial detection
     captureAndAnalyzeFrame();
 
     return () => {
@@ -122,20 +111,16 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
   const startCamera = async () => {
     try {
       setCameraError(null);
-      
+
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          facingMode: 'user'
-        },
+        video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
         audio: false
       });
 
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
         streamRef.current = stream;
-        
+
         videoRef.current.onloadedmetadata = () => {
           videoRef.current?.play();
           setCameraReady(true);
@@ -153,16 +138,11 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
       streamRef.current.getTracks().forEach(track => track.stop());
       streamRef.current = null;
     }
-    
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-    }
-    
+    if (videoRef.current) videoRef.current.srcObject = null;
     if (detectionIntervalRef.current) {
       clearInterval(detectionIntervalRef.current);
       detectionIntervalRef.current = null;
     }
-    
     setCameraReady(false);
   };
 
@@ -171,61 +151,61 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
 
     try {
       setIsDetecting(true);
-      
+
       const video = videoRef.current;
       const canvas = canvasRef.current;
       const context = canvas.getContext('2d');
-
       if (!context) return;
 
-      // Set canvas size to match video
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
-
-      // Draw current frame to canvas
       context.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-      // Convert to base64
-      const frameData = canvas.toDataURL('image/jpeg', 0.8);
+      // Convert to blob for multipart upload
+      canvas.toBlob(async (blob) => {
+        if (!blob) return;
 
-      // Send to backend for analysis
-      const response = await api.post('/monitor/analyze-frame', {
-        attempt_id: attemptId,
-        frame_data: frameData,
-        timestamp: new Date().toISOString()
-      });
+        try {
+          // FIX Bug 3: Use correct endpoint /monitor/frame with FormData
+          const formData = new FormData();
+          formData.append('attempt_id', attemptId);
+          formData.append('file', blob, 'frame.jpg');
 
-      const result: DetectionResult = response.data;
-      
-      setLastDetection(result);
-      setFrameCount(prev => prev + 1);
+          const response = await api.post('/monitor/frame', formData, {
+            headers: { 'Content-Type': 'multipart/form-data' }
+          });
 
-      // Report violations if any
-      if (result.flags && result.flags.length > 0) {
-        result.flags.forEach(flag => {
-          reportViolation(flag);
-        });
-      }
+          const result: DetectionResult = response.data;
+          setLastDetection(result);
+          setFrameCount(prev => prev + 1);
+
+          if (result.flags && result.flags.length > 0) {
+            result.flags.forEach(flag => reportViolation(flag));
+          }
+        } catch (err) {
+          console.error('Frame upload error:', err);
+        } finally {
+          setIsDetecting(false);
+        }
+      }, 'image/jpeg', 0.8);
 
     } catch (error) {
-      console.error('Frame analysis error:', error);
-    } finally {
+      console.error('Frame capture error:', error);
       setIsDetecting(false);
     }
   }, [attemptId, isDetecting]);
 
   const reportViolation = async (violation: any) => {
     try {
-      await api.post('/monitor/violation', {
+      // FIX Bug 4: Use correct endpoint /monitor/enhanced/violation
+      await api.post('/monitor/enhanced/violation', {
         attempt_id: attemptId,
         event_type: 'proctoring_flag',
         flags: [violation],
         timestamp: new Date().toISOString()
       });
 
-      if (onViolation) {
-        onViolation(violation);
-      }
+      if (onViolation) onViolation(violation);
     } catch (error) {
       console.error('Failed to report violation:', error);
     }
@@ -233,37 +213,18 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
 
   const getStatusColor = () => {
     if (!lastDetection) return 'text-slate-400';
-    
-    if (lastDetection.flags.length === 0 && lastDetection.face_present) {
-      return 'text-emerald-500';
-    }
-    
+    if (lastDetection.flags.length === 0 && lastDetection.face_present) return 'text-emerald-500';
     const hasCritical = lastDetection.flags.some(f => f.severity === 'high');
-    if (hasCritical) return 'text-rose-500';
-    
-    return 'text-amber-500';
+    return hasCritical ? 'text-rose-500' : 'text-amber-500';
   };
 
   const getStatusMessage = () => {
     if (!cameraReady) return 'Camera initializing...';
     if (!lastDetection) return 'Waiting for first detection...';
-    
-    if (lastDetection.flags.length === 0 && lastDetection.face_present) {
-      return 'All good - Looking at screen';
-    }
-    
-    if (!lastDetection.face_present) {
-      return '⚠️ No face detected';
-    }
-    
-    if (lastDetection.multiple_faces) {
-      return '⚠️ Multiple faces detected';
-    }
-    
-    if (!lastDetection.looking_at_screen) {
-      return '⚠️ Looking away from screen';
-    }
-    
+    if (lastDetection.flags.length === 0 && lastDetection.face_present) return '✅ All good - Looking at screen';
+    if (!lastDetection.face_present) return '⚠️ No face detected';
+    if (lastDetection.multiple_faces) return '⚠️ Multiple faces detected';
+    if (!lastDetection.looking_at_screen) return '⚠️ Looking away from screen';
     return 'Monitoring active';
   };
 
@@ -288,7 +249,6 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
               ) : (
                 <Loader className="w-6 h-6 animate-spin" />
               )}
-              
               {cameraReady && (
                 <motion.div
                   className="absolute -top-1 -right-1 w-3 h-3 bg-emerald-500 rounded-full"
@@ -297,40 +257,28 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
                 />
               )}
             </div>
-            
             <div>
               <p className="font-semibold text-slate-900">Camera Proctoring</p>
-              <p className={`text-sm ${getStatusColor()}`}>
-                {getStatusMessage()}
-              </p>
+              <p className={`text-sm ${getStatusColor()}`}>{getStatusMessage()}</p>
             </div>
           </div>
 
           <button
             onClick={() => setShowPreview(!showPreview)}
-            className="btn-secondary text-sm flex items-center gap-2"
+            className="text-sm flex items-center gap-2 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 rounded-lg transition"
           >
             {showPreview ? (
-              <>
-                <EyeOff className="w-4 h-4" />
-                Hide Preview
-              </>
+              <><EyeOff className="w-4 h-4" /> Hide Preview</>
             ) : (
-              <>
-                <Eye className="w-4 h-4" />
-                Show Preview
-              </>
+              <><Eye className="w-4 h-4" /> Show Preview</>
             )}
           </button>
         </div>
 
-        {/* Detection Stats */}
         {lastDetection && (
           <div className="mt-4 pt-4 border-t border-slate-100 grid grid-cols-4 gap-4 text-center">
             <div>
-              <p className="text-2xl font-bold text-slate-900">
-                {lastDetection.faces_detected}
-              </p>
+              <p className="text-2xl font-bold text-slate-900">{lastDetection.faces_detected}</p>
               <p className="text-xs text-slate-600">Faces</p>
             </div>
             <div>
@@ -340,22 +288,17 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
               <p className="text-xs text-slate-600">Confidence</p>
             </div>
             <div>
-              <p className="text-2xl font-bold text-slate-900">
-                {frameCount}
-              </p>
+              <p className="text-2xl font-bold text-slate-900">{frameCount}</p>
               <p className="text-xs text-slate-600">Frames</p>
             </div>
             <div>
-              <p className="text-2xl font-bold text-slate-900">
-                {lastDetection.flags.length}
-              </p>
+              <p className="text-2xl font-bold text-slate-900">{lastDetection.flags.length}</p>
               <p className="text-xs text-slate-600">Flags</p>
             </div>
           </div>
         )}
       </div>
 
-      {/* Camera Error */}
       {cameraError && (
         <motion.div
           initial={{ opacity: 0, y: -10 }}
@@ -366,87 +309,71 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
           <div>
             <p className="font-semibold text-rose-900">Camera Access Error</p>
             <p className="text-sm text-rose-700 mt-1">{cameraError}</p>
-            <button
-              onClick={startCamera}
-              className="mt-3 text-sm font-medium text-rose-600 hover:text-rose-700"
-            >
+            <button onClick={startCamera} className="mt-3 text-sm font-medium text-rose-600 hover:text-rose-700">
               Try Again
             </button>
           </div>
         </motion.div>
       )}
 
-      {/* Video Preview */}
-      <AnimatePresence>
-        {showPreview && cameraReady && (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            exit={{ opacity: 0, height: 0 }}
-            className="bg-white rounded-lg border border-slate-200 overflow-hidden"
-          >
-            <div className="relative">
-              <video
-                ref={videoRef}
-                autoPlay
-                playsInline
-                muted
-                className="w-full h-auto max-h-96 object-cover bg-slate-900"
-              />
-              
-              {/* Detection Overlay */}
-              {lastDetection && (
-                <div className="absolute top-3 left-3 right-3 space-y-2">
-                  {lastDetection.face_present && (
-                    <div className="inline-flex items-center gap-2 bg-emerald-500 text-white px-3 py-1 rounded-full text-sm font-medium">
-                      <CheckCircle className="w-4 h-4" />
-                      Face Detected
-                    </div>
-                  )}
-                  
-                  {lastDetection.multiple_faces && (
-                    <div className="inline-flex items-center gap-2 bg-rose-500 text-white px-3 py-1 rounded-full text-sm font-medium ml-2">
-                      <AlertTriangle className="w-4 h-4" />
-                      Multiple Faces
-                    </div>
-                  )}
-                  
-                  {!lastDetection.looking_at_screen && lastDetection.face_present && (
-                    <div className="inline-flex items-center gap-2 bg-amber-500 text-white px-3 py-1 rounded-full text-sm font-medium ml-2">
-                      <AlertTriangle className="w-4 h-4" />
-                      Looking Away
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Processing Indicator */}
-              {isDetecting && (
-                <div className="absolute bottom-3 right-3">
-                  <div className="bg-indigo-500 text-white px-3 py-1 rounded-full text-xs font-medium flex items-center gap-2">
-                    <div className="w-2 h-2 bg-white rounded-full animate-pulse" />
-                    Analyzing...
+      {/* FIX Bug 11: Single video element, always rendered, hidden/shown via CSS */}
+      <div className={showPreview && cameraReady ? '' : 'hidden'}>
+        <AnimatePresence>
+          {showPreview && cameraReady && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              className="bg-white rounded-lg border border-slate-200 overflow-hidden"
+            >
+              <div className="relative">
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className="w-full h-auto max-h-96 object-cover bg-slate-900"
+                />
+                {lastDetection && (
+                  <div className="absolute top-3 left-3 right-3 flex flex-wrap gap-2">
+                    {lastDetection.face_present && (
+                      <div className="inline-flex items-center gap-2 bg-emerald-500 text-white px-3 py-1 rounded-full text-sm font-medium">
+                        <CheckCircle className="w-4 h-4" /> Face Detected
+                      </div>
+                    )}
+                    {lastDetection.multiple_faces && (
+                      <div className="inline-flex items-center gap-2 bg-rose-500 text-white px-3 py-1 rounded-full text-sm font-medium">
+                        <AlertTriangle className="w-4 h-4" /> Multiple Faces
+                      </div>
+                    )}
+                    {!lastDetection.looking_at_screen && lastDetection.face_present && (
+                      <div className="inline-flex items-center gap-2 bg-amber-500 text-white px-3 py-1 rounded-full text-sm font-medium">
+                        <AlertTriangle className="w-4 h-4" /> Looking Away
+                      </div>
+                    )}
                   </div>
-                </div>
-              )}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
+                )}
+                {isDetecting && (
+                  <div className="absolute bottom-3 right-3">
+                    <div className="bg-indigo-500 text-white px-3 py-1 rounded-full text-xs font-medium flex items-center gap-2">
+                      <div className="w-2 h-2 bg-white rounded-full animate-pulse" />
+                      Analyzing...
+                    </div>
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+
+      {/* FIX Bug 11: Video always rendered (for stream), but hidden when preview off */}
+      {!showPreview && (
+        <video ref={videoRef} autoPlay playsInline muted className="hidden" />
+      )}
 
       {/* Hidden canvas for frame capture */}
       <canvas ref={canvasRef} className="hidden" />
-
-      {/* Hidden video element (always active for detection) */}
-      {!showPreview && (
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          muted
-          className="hidden"
-        />
-      )}
     </div>
   );
 };
