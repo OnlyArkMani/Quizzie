@@ -6,14 +6,18 @@ import uuid
 import enum
 from app.core.database import Base
 
+#  REMOVED: `from app.models.exam import Exam` was here causing circular import
+
+
 class ExamStatus(str, enum.Enum):
     DRAFT = "draft"
     LIVE = "live"
     ENDED = "ended"
 
+
 class Exam(Base):
     __tablename__ = "exams"
-    
+
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     title = Column(String(255), nullable=False)
     description = Column(String, nullable=True)
@@ -26,7 +30,7 @@ class Exam(Base):
     created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"))
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    
+
     # Relationships
     questions = relationship("Question", back_populates="exam", cascade="all, delete-orphan")
     attempts = relationship("ExamAttempt", back_populates="exam")
