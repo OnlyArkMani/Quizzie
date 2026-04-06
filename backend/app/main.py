@@ -1,5 +1,8 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi import Request
 from app.core.config import settings
 
 # Import routers one by one to catch errors
@@ -23,6 +26,18 @@ app = FastAPI(
     description="Online Quiz Platform with AI Proctoring",
     version=settings.VERSION
 )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    import traceback
+    print("--- VALIDATION ERROR ---")
+    print(exc.errors())
+    print("BODY:", exc.body)
+    print("------------------------")
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors(), "body": exc.body},
+    )
 
 # CORS
 app.add_middleware(
