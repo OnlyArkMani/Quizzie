@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import {
@@ -26,6 +26,17 @@ const ExamLobby = () => {
 
   const [starting, setStarting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (!examId) return;
@@ -58,7 +69,10 @@ const ExamLobby = () => {
       setCameraAccessGranted(true);
       setMicAccessGranted(true);
 
-      stream.getTracks().forEach((track) => track.stop());
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+      }
     } catch (error) {
       console.error('Permission denied:', error);
       setCameraAccessGranted(false);
@@ -214,6 +228,27 @@ const ExamLobby = () => {
                 Microphone {micAccessGranted ? 'Granted' : 'Recommended'}
               </span>
               {micAccessGranted && <Check className="w-5 h-5 text-emerald-600" />}
+            </div>
+          </div>
+
+          {/* Camera Preview */}
+          <div className="mb-8">
+            <h3 className="text-sm font-semibold text-slate-700 mb-2">Camera Preview</h3>
+            <div className="bg-slate-900 rounded-lg overflow-hidden aspect-video relative flex items-center justify-center">
+               {!cameraAccessGranted ? (
+                 <div className="text-slate-400 flex flex-col items-center">
+                    <Camera className="w-8 h-8 mb-2 opacity-50" />
+                    <span>Camera preview will appear here</span>
+                 </div>
+               ) : (
+                 <video 
+                   ref={videoRef} 
+                   autoPlay 
+                   playsInline 
+                   muted 
+                   className="w-full h-full object-cover transform -scale-x-100" 
+                 />
+               )}
             </div>
           </div>
 
