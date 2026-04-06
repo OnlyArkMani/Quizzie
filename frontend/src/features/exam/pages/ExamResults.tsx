@@ -20,6 +20,7 @@ const ExamResults = () => {
   const attemptId = location.state?.attemptId;
 
   const [results, setResults] = useState<any>(null);
+  const [violations, setViolations] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -32,6 +33,14 @@ const ExamResults = () => {
     try {
       const response = await api.get(`/attempts/${attemptId}/results`);
       setResults(response.data);
+      
+      // Also fetch detailed violations if any are flagged
+      try {
+        const tReq = await api.get(`/monitor/enhanced/attempt/${attemptId}/violations`);
+        setViolations(tReq.data.timeline || []);
+      } catch (err) {
+        console.warn('Could not fetch specific violations');
+      }
     } catch (error) {
       console.error('Failed to fetch results:', error);
     } finally {
@@ -175,12 +184,27 @@ const ExamResults = () => {
           >
             <div className="flex items-start gap-3">
               <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
-              <div>
+              <div className="w-full">
                 <h3 className="font-semibold text-amber-900 mb-1">Suspicious Activity Detected</h3>
                 <p className="text-sm text-amber-700">
                   {results.cheating_flags} suspicious {results.cheating_flags === 1 ? 'behavior was' : 'behaviors were'} flagged during your exam. 
                   This may be reviewed by your examiner.
                 </p>
+                {violations.length > 0 && (
+                  <div className="mt-4 space-y-2 max-h-60 overflow-y-auto pr-2 custom-scrollbar">
+                    {violations.map((v: any, index: number) => (
+                      <div key={v.id || index} className="text-sm text-amber-800 bg-amber-100/50 p-2 rounded flex justify-between items-center">
+                        <div>
+                          <span className="uppercase text-xs font-bold mr-2 opacity-70">[{v.severity}]</span>
+                          <span className="capitalize">{v.metadata?.message || v.type.replace(/_/g, ' ')}</span>
+                        </div>
+                        <span className="font-medium opacity-60 ml-4 whitespace-nowrap">
+                          {new Date(v.timestamp).toLocaleTimeString()}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           </motion.div>
