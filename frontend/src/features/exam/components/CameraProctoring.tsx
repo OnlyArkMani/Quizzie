@@ -16,6 +16,7 @@ interface CameraProctoringProps {
   isActive: boolean;
   settings: {
     camera_enabled: boolean;
+    microphone_enabled: boolean;
     face_detection_enabled: boolean;
     detection_interval: number;
   };
@@ -45,7 +46,7 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const detectionIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const detectionIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const [cameraReady, setCameraReady] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
@@ -54,34 +55,44 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
   const [frameCount, setFrameCount] = useState(0);
   const [showPreview, setShowPreview] = useState(false);
 
-  // Tab visibility detection
+  const [audioDetecting, setAudioDetecting] = useState(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+
+  // Tab visibility and Blur detection
   useEffect(() => {
-    if (!isActive || !settings.camera_enabled) return;
+    if (!isActive) return;
+
+    const handleViolation = () => {
+      reportViolation({
+        type: 'tab_switch',
+        severity: 'high',
+        message: 'Student switched tabs or lost window focus',
+        metadata: { timestamp: new Date().toISOString() }
+      });
+    };
 
     const handleVisibilityChange = () => {
-      if (document.hidden) {
-        reportViolation({
-          type: 'tab_switch',
-          severity: 'high',
-          message: 'Student switched to another tab or window',
-          metadata: { timestamp: new Date().toISOString() }
-        });
-      }
+      if (document.hidden) handleViolation();
     };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
-    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
-  }, [isActive, settings.camera_enabled]);
+    window.addEventListener('blur', handleViolation);
 
-  // Initialize camera
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.removeEventListener('blur', handleViolation);
+    };
+  }, [isActive]);
+
+  // Initialize camera & microphone
   useEffect(() => {
-    if (!isActive || !settings.camera_enabled) {
+    if (!isActive || (!settings.camera_enabled && !settings.microphone_enabled)) {
       stopCamera();
       return;
     }
     startCamera();
     return () => stopCamera();
-  }, [isActive, settings.camera_enabled]);
+  }, [isActive, settings.camera_enabled, settings.microphone_enabled]);
 
   // Start detection loop
   useEffect(() => {
@@ -113,27 +124,64 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
       setCameraError(null);
 
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
-        audio: false
+        video: settings.camera_enabled ? { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' } : false,
+        audio: settings.microphone_enabled
       });
 
-      if (videoRef.current) {
+      if (videoRef.current && settings.camera_enabled) {
         videoRef.current.srcObject = stream;
-        streamRef.current = stream;
-
         videoRef.current.onloadedmetadata = () => {
           videoRef.current?.play();
           setCameraReady(true);
         };
+      } else if (!settings.camera_enabled && settings.microphone_enabled) {
+        setCameraReady(true);
+      }
+
+      streamRef.current = stream;
+
+      // Start Audio recording if enabled
+      if (settings.microphone_enabled) {
+        const recorder = new MediaRecorder(stream);
+        mediaRecorderRef.current = recorder;
+
+        recorder.ondataavailable = async (e) => {
+          if (e.data.size > 0 && !audioDetecting) {
+            setAudioDetecting(true);
+            try {
+              const formData = new FormData();
+              formData.append('attempt_id', attemptId);
+              formData.append('file', e.data, 'audio.webm');
+              
+              const res = await api.post('/monitor/audio', formData, {
+                headers: { 'Content-Type': 'multipart/form-data' }
+              });
+
+              if (res.data.flags && res.data.flags.length > 0) {
+                res.data.flags.forEach((flag: string) => reportViolation(flag));
+              }
+            } catch (err) {
+              console.error('Audio upload error:', err);
+            } finally {
+              setAudioDetecting(false);
+            }
+          }
+        };
+
+        // Capture every X seconds (convert to ms)
+        recorder.start(settings.detection_interval * 1000);
       }
     } catch (error: any) {
-      console.error('Camera access error:', error);
-      setCameraError(error.message || 'Failed to access camera');
+      console.error('Media access error:', error);
+      setCameraError(error.message || 'Failed to access camera/microphone');
       setCameraReady(false);
     }
   };
 
   const stopCamera = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop();
+    }
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(track => track.stop());
       streamRef.current = null;
@@ -197,15 +245,24 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
 
   const reportViolation = async (violation: any) => {
     try {
+      // FIX Bug: Normalize string flags into dicts for Python Pydantic validation
+      const isString = typeof violation === 'string';
+      const normalizedViolation = isString ? {
+        type: violation,
+        severity: violation.includes('multiple') || violation.includes('no_face') ? 'high' : 'medium',
+        message: `System detected: ${violation.replace(/_/g, ' ')}`,
+        metadata: { timestamp: new Date().toISOString() }
+      } : violation;
+
       // FIX Bug 4: Use correct endpoint /monitor/enhanced/violation
       await api.post('/monitor/enhanced/violation', {
         attempt_id: attemptId,
         event_type: 'proctoring_flag',
-        flags: [violation],
+        flags: [normalizedViolation],
         timestamp: new Date().toISOString()
       });
 
-      if (onViolation) onViolation(violation);
+      if (onViolation) onViolation(normalizedViolation);
     } catch (error) {
       console.error('Failed to report violation:', error);
     }
