@@ -46,17 +46,25 @@ async def analyze_frame(
     
     # Log flags if any
     if result['flags']:
+        from app.models.cheat_log import CheatSeverity
         for flag in result['flags']:
+            raw_severity = result.get('severity', 'low')
+            try:
+                valid_severity = CheatSeverity(raw_severity)
+            except ValueError:
+                valid_severity = CheatSeverity.LOW
+
             log = CheatLog(
                 attempt_id=attempt_id,
                 flag_type=flag,
-                severity=result['severity'],
+                severity=valid_severity,
                 meta_data={'num_faces': result.get('num_faces', 0)}
             )
             db.add(log)
         
-        # Increment cheating flags count
-        attempt.cheating_flags += len(result['flags'])
+        # Increment cheating flags count safely
+        current_flags = attempt.cheating_flags or 0
+        attempt.cheating_flags = current_flags + len(result['flags'])
         
         db.commit()
     
@@ -94,17 +102,26 @@ async def analyze_audio(
     
     # Log flags if any
     if result['flags']:
+        from app.models.cheat_log import CheatSeverity
         for flag in result['flags']:
+            # Validate or cast severity safely
+            raw_severity = result.get('severity', 'low')
+            try:
+                valid_severity = CheatSeverity(raw_severity)
+            except ValueError:
+                valid_severity = CheatSeverity.LOW
+
             log = CheatLog(
                 attempt_id=attempt_id,
                 flag_type=flag,
-                severity=result['severity'],
-                meta_data={'rms_energy': result.get('rms_energy', 0)}
+                severity=valid_severity,
+                meta_data={'rms_energy': float(result.get('rms_energy', 0))}
             )
             db.add(log)
         
-        # Increment cheating flags count
-        attempt.cheating_flags += len(result['flags'])
+        # Increment cheating flags count safely
+        current_flags = attempt.cheating_flags or 0
+        attempt.cheating_flags = current_flags + len(result['flags'])
         
         db.commit()
     
