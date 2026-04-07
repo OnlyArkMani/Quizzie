@@ -7,6 +7,7 @@ import { motion } from 'framer-motion';
 import { LogIn, Mail, Lock, AlertCircle } from 'lucide-react';
 import { useAuthStore } from '../store/authStore';
 import api from '@/lib/api';
+import logo from '@/assets/quizzie_logo.png';
 
 const loginSchema = z.object({
   email: z.string().email('Invalid email address'),
@@ -53,12 +54,33 @@ const LoginPage = () => {
         className="w-full max-w-md"
       >
         {/* Logo & Header */}
-        <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-indigo-600 mb-4">
-            <LogIn className="w-8 h-8 text-white" />
-          </div>
-          <h1 className="text-3xl font-bold text-slate-900 mb-2">Welcome Back</h1>
-          <p className="text-slate-600">Sign in to continue to Quizzie</p>
+        <div className="text-center mb-10">
+          <motion.div 
+            initial={{ scale: 0, rotate: -180 }}
+            animate={{ scale: 1, rotate: 0 }}
+            transition={{ type: "spring", stiffness: 200, damping: 20, duration: 0.8 }}
+            className="inline-flex items-center justify-center w-24 h-24 rounded-3xl bg-white shadow-xl shadow-indigo-200 mb-6 overflow-hidden ring-4 ring-white"
+          >
+            <img src={logo} alt="Quizzie Logo" className="w-full h-full object-cover" />
+          </motion.div>
+          
+          <motion.h1 
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.2, duration: 0.8, ease: "easeOut" }}
+            className="text-5xl font-extrabold text-transparent bg-clip-text bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-500 mb-3 tracking-tight drop-shadow-sm"
+          >
+            Quizzie
+          </motion.h1>
+          
+          <motion.p 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ delay: 0.4 }}
+            className="text-slate-500 font-medium text-lg"
+          >
+            Welcome Back! Sign in to continue.
+          </motion.p>
         </div>
 
         {/* Login Card */}
