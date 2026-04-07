@@ -12,11 +12,11 @@ import json
 import asyncio
 from collections import defaultdict
 
-from app.core.database import get_db
+from app.core.database import get_db, SessionLocal
 from app.api.deps import get_current_user
 from app.models.user import User
 from app.models.attempt import ExamAttempt
-from app.models.cheat_log import CheatLog
+from app.models.cheat_log import CheatLog, CheatSeverity
 from app.models.exam import Exam
 # FIX Bug 2: Import with alias to avoid name conflict with Pydantic schema below
 from app.models.proctoring_settings import ProctoringSettings as ProctoringSettingsModel
@@ -74,7 +74,7 @@ manager = ConnectionManager()
 class ExamProctoringConfig(BaseModel):
     """Proctoring configuration settings for an exam"""
     camera_enabled: bool = True
-    microphone_enabled: bool = False
+    microphone_enabled: bool = True
     face_detection_enabled: bool = True
     multiple_face_detection: bool = True
     head_pose_detection: bool = True
@@ -243,11 +243,17 @@ async def report_violation(
             flag.get('severity', 'medium')
         )
 
-        # FIX Bug 1: Use meta_data (not metadata)
+        # FIX Bug 1: Handle strict Enum checking for sqlalchemy
+        severity_str = flag.get('severity', 'medium')
+        try:
+            severity_enum = CheatSeverity(severity_str)
+        except ValueError:
+            severity_enum = CheatSeverity.MEDIUM
+
         cheat_log = CheatLog(
             attempt_id=attempt.id,
             flag_type=flag['type'],
-            severity=flag.get('severity', 'medium'),
+            severity=severity_enum,
             timestamp=event.timestamp,
             meta_data={
                 'message': flag.get('message'),
@@ -261,8 +267,6 @@ async def report_violation(
 
     auto_submitted = False
     if health_calculator.current_health <= 0 and cfg.auto_submit_on_zero_health:
-        attempt.status = 'submitted'
-        attempt.submitted_at = datetime.utcnow()
         auto_submitted = True
 
     db.commit()
@@ -373,8 +377,7 @@ async def get_attempt_violations(
 @router.websocket("/ws/proctoring/{attempt_id}")
 async def proctoring_websocket(
     websocket: WebSocket,
-    attempt_id: str,
-    db: Session = Depends(get_db)
+    attempt_id: str
 ):
     """WebSocket endpoint for real-time proctoring updates"""
     await manager.connect(attempt_id, websocket)
@@ -385,6 +388,29 @@ async def proctoring_websocket(
             "message": "Proctoring monitoring active",
             "attempt_id": attempt_id
         })
+
+        # Calculate initial health from existing logs and transmit immediately
+        db = SessionLocal()
+        try:
+            attempt = db.query(ExamAttempt).filter(ExamAttempt.id == attempt_id).first()
+            if attempt:
+                ps = db.query(ProctoringSettingsModel).filter(ProctoringSettingsModel.exam_id == attempt.exam_id).first()
+                cfg = ExamProctoringConfig(
+                    initial_health=ps.initial_health if ps else 100,
+                    health_warning_threshold=ps.health_warning_threshold if ps else 40,
+                    auto_submit_on_zero_health=ps.auto_submit_on_zero_health if ps else True,
+                )
+                calc = HealthCalculator(cfg.initial_health)
+                existing = db.query(CheatLog).filter(CheatLog.attempt_id == attempt_id).all()
+                for v in existing:
+                    calc.apply_violation(v.flag_type, str(v.severity).replace('CheatSeverity.', ''))
+                
+                await websocket.send_json({
+                    "type": "health_update",
+                    "data": calc.get_health_status()
+                })
+        finally:
+            db.close()
 
         while True:
             data = await websocket.receive_json()
@@ -409,7 +435,8 @@ class HealthCalculator:
         'multiple_faces': 15,
         'looking_away': 5,
         'face_tracking_lost': 5,
-        'tab_switch': 8,
+        'tab_switch': 5,
+        'fullscreen_exit': 10,
         'suspicious_audio': 3,
         'excessive_movement': 2,
         'no_face_detected': 10,
