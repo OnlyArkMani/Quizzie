@@ -61,10 +61,7 @@ def start_exam(
     ).first()
 
     if recent_attempt:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="You have an exam in progress. Please complete or submit it first."
-        )
+        return recent_attempt
 
     # Create new attempt
     new_attempt = ExamAttempt(
@@ -97,8 +94,9 @@ def submit_exam(
     if str(attempt.student_id) != str(current_user.id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
 
-    # FIX Bug 10: Use enum value
-    if attempt.status != AttemptStatus.IN_PROGRESS:
+    # FIX Bug 10: Robust enum check
+    status_val = attempt.status.value if hasattr(attempt.status, 'value') else attempt.status
+    if status_val != AttemptStatus.IN_PROGRESS.value:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Attempt already submitted")
 
     # Save responses
@@ -147,8 +145,9 @@ def get_results(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
 
     # FIX Bug 10: Use enum value
-    if attempt.status != AttemptStatus.EVALUATED:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Results not available yet")
+    status_val = attempt.status.value if hasattr(attempt.status, 'value') else attempt.status
+    if status_val != AttemptStatus.EVALUATED.value:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Results not ready yet")
 
     responses = db.query(Response).filter(Response.attempt_id == attempt_id).all()
     topic_wise = {}
