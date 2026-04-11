@@ -5,6 +5,9 @@ from fastapi.responses import JSONResponse
 from fastapi import Request
 from app.core.config import settings
 
+# Ensure all models are imported so SQLAlchemy knows about them before create_all
+import app.models  # noqa: F401  — registers User, Exam, Question, Attempt, CheatLog, ProctoringSettings
+
 # Import routers one by one to catch errors
 from app.api.v1 import auth
 from app.api.v1 import exams
@@ -67,6 +70,18 @@ if enhanced_monitoring is not None:
     print("✅ Enhanced monitoring router registered!")
 else:
     print("❌ Enhanced monitoring router NOT registered!")
+
+@app.on_event("startup")
+def auto_create_tables():
+    """
+    Idempotent table creation on every startup.
+    Adds any tables that are in the SQLAlchemy models but not yet in the DB.
+    Existing tables and data are NEVER touched (checkfirst=True is the default).
+    """
+    from app.core.database import Base, engine
+    Base.metadata.create_all(bind=engine)
+    print("✅ Database tables verified / created.")
+
 
 @app.get("/")
 def root():
