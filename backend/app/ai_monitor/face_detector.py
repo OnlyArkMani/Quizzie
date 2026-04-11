@@ -22,7 +22,8 @@ class FaceDetector:
     
     def analyze_frame(self, image_bytes: bytes) -> Dict:
         """
-        Analyze webcam frame for face detection and head pose
+        Analyze webcam frame for face detection and head pose.
+        Returns a dict compatible with the frontend DetectionResult interface.
         """
         try:
             # Decode image
@@ -30,7 +31,7 @@ class FaceDetector:
             image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             
             if image is None:
-                return {'flags': ['invalid_image'], 'severity': 'high', 'num_faces': 0}
+                return self._error_result('invalid_image')
             
             image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
             
@@ -41,50 +42,84 @@ class FaceDetector:
             flags = []
             severity = 'low'
             num_faces = 0
-            
-            # Check number of faces
+            face_confidence = 0.0
+            looking_at_screen = True
+
+            # --- Face count ---
             if detection_results.detections:
                 num_faces = len(detection_results.detections)
-                
-                if num_faces == 0:
-                    flags.append('no_face_detected')
-                    severity = 'high'
-                elif num_faces > 1:
-                    flags.append('multiple_faces_detected')
+                face_confidence = max(
+                    d.score[0] for d in detection_results.detections
+                )
+
+                if num_faces > 1:
+                    flags.append({
+                        'type': 'multiple_faces_detected',
+                        'severity': 'high',
+                        'message': f'{num_faces} faces detected in frame'
+                    })
                     severity = 'high'
             else:
-                flags.append('no_face_detected')
+                flags.append({
+                    'type': 'no_face_detected',
+                    'severity': 'high',
+                    'message': 'No face detected'
+                })
                 severity = 'high'
-            
-            # Check head pose (looking away)
+
+            face_present = num_faces >= 1
+
+            # --- Head pose (looking away) ---
             if mesh_results.multi_face_landmarks:
-                for face_landmarks in mesh_results.multi_face_landmarks:
-                    # Calculate head pose using nose tip and eye landmarks
-                    nose_tip = face_landmarks.landmark[1]
-                    left_eye = face_landmarks.landmark[33]
-                    right_eye = face_landmarks.landmark[263]
-                    
-                    # Simple heuristic: if nose is too far from center
-                    eye_center_x = (left_eye.x + right_eye.x) / 2
-                    deviation = abs(nose_tip.x - eye_center_x)
-                    
-                    if deviation > 0.15:  # Threshold
-                        flags.append('looking_away')
-                        severity = 'medium' if severity == 'low' else severity
-            
+                landmarks = mesh_results.multi_face_landmarks[0]
+                nose_tip   = landmarks.landmark[1]
+                left_eye   = landmarks.landmark[33]
+                right_eye  = landmarks.landmark[263]
+
+                eye_center_x = (left_eye.x + right_eye.x) / 2
+                deviation = abs(nose_tip.x - eye_center_x)
+
+                if deviation > 0.15:
+                    looking_at_screen = False
+                    flags.append({
+                        'type': 'looking_away',
+                        'severity': 'medium',
+                        'message': f'Head turned away (deviation {deviation:.2f})'
+                    })
+                    if severity == 'low':
+                        severity = 'medium'
+            elif face_present:
+                # Face detected but mesh failed — likely looking away
+                looking_at_screen = False
+
+            # Return the full structure the frontend expects
             return {
                 'flags': flags,
                 'severity': severity,
-                'num_faces': num_faces
+                'num_faces': num_faces,
+                # Fields expected by frontend DetectionResult interface:
+                'faces_detected': num_faces,
+                'face_present': face_present,
+                'looking_at_screen': looking_at_screen,
+                'multiple_faces': num_faces > 1,
+                'face_confidence': face_confidence,
             }
         
         except Exception as e:
-            return {
-                'flags': ['processing_error'],
-                'severity': 'low',
-                'num_faces': 0,
-                'error': str(e)
-            }
+            return self._error_result('processing_error', str(e))
+
+    def _error_result(self, flag_type: str, error: str = '') -> Dict:
+        return {
+            'flags': [{'type': flag_type, 'severity': 'low', 'message': error}],
+            'severity': 'low',
+            'num_faces': 0,
+            'faces_detected': 0,
+            'face_present': False,
+            'looking_at_screen': True,
+            'multiple_faces': False,
+            'face_confidence': 0.0,
+            'error': error
+        }
     
     def __del__(self):
         try:
