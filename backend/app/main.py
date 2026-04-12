@@ -27,7 +27,8 @@ except Exception as e:
 app = FastAPI(
     title=settings.APP_NAME,
     description="Online Quiz Platform with AI Proctoring",
-    version=settings.VERSION
+    version=settings.VERSION,
+    redirect_slashes=False,  # Prevent 307 redirects that drop Authorization headers
 )
 
 @app.exception_handler(RequestValidationError)
@@ -42,15 +43,13 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         content={"detail": exc.errors(), "body": exc.body},
     )
 
-# CORS
+# CORS — dev localhost origins are always included; add production URLs via CORS_ORIGINS env var
+_cors_origins = settings.all_cors_origins
+print(f"✅ CORS allowed origins: {_cors_origins}")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -72,15 +71,37 @@ else:
     print("❌ Enhanced monitoring router NOT registered!")
 
 @app.on_event("startup")
-def auto_create_tables():
+def run_migrations():
     """
-    Idempotent table creation on every startup.
-    Adds any tables that are in the SQLAlchemy models but not yet in the DB.
-    Existing tables and data are NEVER touched (checkfirst=True is the default).
+    Auto-run Alembic migrations on every startup.
+    This applies any pending migrations (new columns, tables, etc.) safely.
+    Existing data is never destroyed — Alembic is idempotent.
     """
-    from app.core.database import Base, engine
-    Base.metadata.create_all(bind=engine)
-    print("✅ Database tables verified / created.")
+    import subprocess, sys, os
+    try:
+        backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        result = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            cwd=backend_dir,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            print("✅ Alembic migrations applied successfully.")
+            if result.stdout.strip():
+                print(result.stdout)
+        else:
+            print("⚠️  Alembic migration warning (falling back to create_all):")
+            print(result.stderr)
+            # Fallback: at least create missing tables
+            from app.core.database import Base, engine
+            Base.metadata.create_all(bind=engine)
+            print("✅ Database tables verified / created via create_all.")
+    except Exception as e:
+        print(f"⚠️  Migration runner error: {e} — falling back to create_all")
+        from app.core.database import Base, engine
+        Base.metadata.create_all(bind=engine)
+        print("✅ Database tables verified / created via create_all.")
 
 
 @app.get("/")

@@ -63,10 +63,14 @@ def get_current_user(
 
 def require_role(allowed_roles: list):
     """
-    Dependency to check if user has required role
+    Dependency to check if user has required role.
+    Handles both raw string roles and SQLAlchemy Enum members.
     """
     def role_checker(current_user: User = Depends(get_current_user)) -> User:
-        if current_user.role not in allowed_roles:
+        # current_user.role may be a UserRole enum member OR a plain string
+        # normalise to the string value so comparisons always work
+        role_value = current_user.role.value if hasattr(current_user.role, 'value') else str(current_user.role)
+        if role_value not in allowed_roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Not enough permissions"
