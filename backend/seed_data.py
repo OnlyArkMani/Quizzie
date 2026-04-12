@@ -18,8 +18,23 @@ def seed_db():
         print("Seeding database...")
         
         # Check if users already exist
-        existing_student = db.query(User).filter(User.email == "student@demo.com").first()
-        if existing_student:
+        existing_student  = db.query(User).filter(User.email == "student@demo.com").first()
+        existing_examiner = db.query(User).filter(User.email == "examiner@demo.com").first()
+
+        if existing_student and existing_examiner:
+            # Ensure demo accounts are marked as verified (in case migration ran before this fix)
+            changed = False
+            if not existing_student.is_verified:
+                existing_student.is_verified = True
+                changed = True
+                print("  Fixed: student@demo.com marked as verified")
+            if not existing_examiner.is_verified:
+                existing_examiner.is_verified = True
+                changed = True
+                print("  Fixed: examiner@demo.com marked as verified")
+            if changed:
+                db.commit()
+
             print("  Users already exist!")
             print("\n Test Credentials:")
             print("   Student: student@demo.com / pass123")
@@ -35,14 +50,16 @@ def seed_db():
             email="student@demo.com",
             password_hash=student_password,
             full_name="John Student",
-            role="student"
+            role="student",
+            is_verified=True,   # demo account — no email verification required
         )
         
         examiner = User(
             email="examiner@demo.com",
             password_hash=examiner_password,
             full_name="Jane Examiner",
-            role="examiner"
+            role="examiner",
+            is_verified=True,   # demo account — no email verification required
         )
         
         db.add(student)
