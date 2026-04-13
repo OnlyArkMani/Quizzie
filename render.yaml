@@ -56,3 +56,5 @@ services:
     envVars:
       - key: VITE_API_URL
         value: ""   # Leave blank — nginx proxies /api/ to backend internally
+      - key: BACKEND_URL
+        value: "http://quizzie-backend:10000"  # Render internal hostname for the backend service
