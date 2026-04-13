@@ -38,7 +38,7 @@ const Button: React.FC<ButtonProps> = ({
       whileTap={{ scale: disabled || isLoading ? 1 : 0.98 }}
       className={`${baseStyles} ${variants[variant]} ${sizes[size]} ${className}`}
       disabled={disabled || isLoading}
-      {...props}
+      {...props as any}
     >
       {isLoading && <Loader2 className="w-4 h-4 animate-spin" />}
       {children}

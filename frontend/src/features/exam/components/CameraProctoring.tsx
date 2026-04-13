@@ -423,7 +423,7 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
           <div>
             <p className="font-semibold text-rose-900">Camera Access Error</p>
             <p className="text-sm text-rose-700 mt-1">{cameraError}</p>
-            <button onClick={startCamera} className="mt-3 text-sm font-medium text-rose-600 hover:text-rose-700">Try Again</button>
+            <button onClick={() => startCamera()} className="mt-3 text-sm font-medium text-rose-600 hover:text-rose-700">Try Again</button>
           </div>
         </motion.div>
       )}
