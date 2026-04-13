@@ -31,7 +31,7 @@ const ExaminerDashboard = () => {
   const fetchDashboardData = async () => {
     try {
       const [examsRes, statsRes] = await Promise.all([
-        api.get('/exams'),
+        api.get('/exams/'),
         api.get('/analytics/examiner/stats'),
       ]);
 

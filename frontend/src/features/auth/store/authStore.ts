@@ -6,6 +6,7 @@ interface User {
   email: string;
   full_name: string;
   role: 'student' | 'examiner' | 'admin';
+  is_verified?: boolean;
   created_at?: string;
 }
 

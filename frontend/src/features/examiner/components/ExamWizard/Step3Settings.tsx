@@ -15,7 +15,7 @@ const Step3Settings = () => {
     setIsSubmitting(true);
 
     try {
-      // Create exam
+      // Create exam — use trailing slash to match FastAPI route
       const examPayload = {
         title: currentDraft.title,
         description: currentDraft.description,
@@ -25,10 +25,10 @@ const Step3Settings = () => {
         status,
       };
 
-      const examResponse = await api.post('/exams', examPayload);
+      const examResponse = await api.post('/exams/', examPayload);
       const examId = examResponse.data.id;
 
-      // Add questions
+      // Add questions one by one
       for (let i = 0; i < currentDraft.questions.length; i++) {
         const question = currentDraft.questions[i];
         await api.post(`/exams/${examId}/questions`, {
@@ -37,14 +37,20 @@ const Step3Settings = () => {
         });
       }
 
+      // If publishing directly, update status to live
+      if (status === 'live') {
+        await api.patch(`/exams/${examId}/status?status=live`);
+      }
+
       // Success
       resetDraft();
       navigate('/examiner', {
         state: { message: 'Exam created successfully!' },
       });
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to create exam:', error);
-      alert('Failed to create exam. Please try again.');
+      const detail = error.response?.data?.detail || 'Failed to create exam. Please try again.';
+      alert(detail);
     } finally {
       setIsSubmitting(false);
     }

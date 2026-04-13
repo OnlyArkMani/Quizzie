@@ -22,12 +22,14 @@ interface ExamDraft {
 interface ExaminerState {
   currentDraft: ExamDraft;
   currentStep: number;
+  examId: string | null;  // set after exam is created in Step 3
   
   updateDraftDetails: (details: Partial<ExamDraft>) => void;
   addQuestion: (question: ExamDraft['questions'][0]) => void;
   updateQuestion: (index: number, question: ExamDraft['questions'][0]) => void;
   removeQuestion: (index: number) => void;
   setStep: (step: number) => void;
+  setExamId: (id: string | null) => void;
   resetDraft: () => void;
 }
 
@@ -43,6 +45,7 @@ const initialDraft: ExamDraft = {
 export const useExaminerStore = create<ExaminerState>((set) => ({
   currentDraft: initialDraft,
   currentStep: 1,
+  examId: null,
   
   updateDraftDetails: (details) => {
     set((state) => ({
@@ -92,8 +95,12 @@ export const useExaminerStore = create<ExaminerState>((set) => ({
   setStep: (step) => {
     set({ currentStep: step });
   },
+
+  setExamId: (id) => {
+    set({ examId: id });
+  },
   
   resetDraft: () => {
-    set({ currentDraft: initialDraft, currentStep: 1 });
+    set({ currentDraft: initialDraft, currentStep: 1, examId: null });
   },
 }));

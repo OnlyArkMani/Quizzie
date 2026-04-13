@@ -4,7 +4,7 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { motion } from 'framer-motion';
-import { LogIn, Mail, Lock, AlertCircle } from 'lucide-react';
+import { Mail, Lock, AlertCircle, RefreshCw } from 'lucide-react';
 import { useAuthStore } from '../store/authStore';
 import api from '@/lib/api';
 import logo from '@/assets/quizzie_logo.png';
@@ -20,6 +20,9 @@ const LoginPage = () => {
   const navigate = useNavigate();
   const { login } = useAuthStore();
   const [error, setError] = useState('');
+  const [unverified, setUnverified] = useState(false);
+  const [resendEmail, setResendEmail] = useState('');
+  const [resendSent, setResendSent] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
 
   const { register, handleSubmit, formState: { errors } } = useForm<LoginFormData>({
@@ -35,11 +38,17 @@ const LoginPage = () => {
       const { user, access_token } = response.data;
       
       login(user, access_token);
-      
-      // Redirect based on role
       navigate(user.role === 'student' ? '/student' : '/examiner');
     } catch (err: any) {
-      setError(err.response?.data?.detail || 'Login failed. Please try again.');
+      const detail = err.response?.data?.detail || 'Login failed. Please try again.';
+      if (err.response?.status === 403 && detail.toLowerCase().includes('verified')) {
+        setUnverified(true);
+        setResendEmail(data.email);
+        setError(detail);
+      } else {
+        setUnverified(false);
+        setError(detail);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -96,10 +105,27 @@ const LoginPage = () => {
               <motion.div
                 initial={{ opacity: 0, x: -20 }}
                 animate={{ opacity: 1, x: 0 }}
-                className="flex items-center gap-3 p-4 bg-rose-50 border border-rose-200 rounded-lg text-rose-700"
+                className="p-4 bg-rose-50 border border-rose-200 rounded-lg text-rose-700"
               >
-                <AlertCircle className="w-5 h-5 flex-shrink-0" />
-                <p className="text-sm">{error}</p>
+                <div className="flex items-center gap-3">
+                  <AlertCircle className="w-5 h-5 flex-shrink-0" />
+                  <p className="text-sm">{error}</p>
+                </div>
+                {unverified && (
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        await api.post('/auth/resend-verification', { email: resendEmail });
+                        setResendSent(true);
+                      } catch {}
+                    }}
+                    className="mt-2 ml-8 flex items-center gap-1 text-xs font-medium text-rose-800 hover:text-rose-900 underline"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    {resendSent ? 'Verification email sent!' : 'Resend verification email'}
+                  </button>
+                )}
               </motion.div>
             )}
 
@@ -124,9 +150,12 @@ const LoginPage = () => {
 
             {/* Password Field */}
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-2">
-                Password
-              </label>
+              <div className="flex items-center justify-between mb-2">
+                <label className="block text-sm font-medium text-slate-700">Password</label>
+                <Link to="/forgot-password" className="text-xs text-indigo-600 hover:text-indigo-700 font-medium">
+                  Forgot password?
+                </Link>
+              </div>
               <div className="relative">
                 <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400" />
                 <input

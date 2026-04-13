@@ -26,7 +26,7 @@ const ManageExams = () => {
 
   const fetchExams = async () => {
     try {
-      const response = await api.get('/exams');
+      const response = await api.get('/exams/');
       setExams(response.data);
     } catch (error) {
       console.error('Failed to fetch exams:', error);

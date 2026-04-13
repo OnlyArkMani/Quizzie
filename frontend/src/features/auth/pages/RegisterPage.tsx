@@ -4,7 +4,7 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { motion } from 'framer-motion';
-import { UserPlus, Mail, Lock, User, AlertCircle } from 'lucide-react';
+import { UserPlus, Mail, Lock, User, AlertCircle, CheckCircle } from 'lucide-react';
 import api from '@/lib/api';
 
 const registerSchema = z.object({
@@ -23,6 +23,7 @@ type RegisterFormData = z.infer<typeof registerSchema>;
 const RegisterPage = () => {
   const navigate = useNavigate();
   const [error, setError] = useState('');
+  const [registeredEmail, setRegisteredEmail] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
   const { register, handleSubmit, formState: { errors } } = useForm<RegisterFormData>({
@@ -43,17 +44,51 @@ const RegisterPage = () => {
         password: data.password,
         role: data.role,
       });
-      
-      // Redirect to login
-      navigate('/login', { 
-        state: { message: 'Registration successful! Please log in.' } 
-      });
+      setRegisteredEmail(data.email);
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Registration failed. Please try again.');
     } finally {
       setIsLoading(false);
     }
   };
+
+  // ── Success screen ─────────────────────────────────────────────────────────
+  if (registeredEmail) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50 flex items-center justify-center p-4">
+        <motion.div
+          initial={{ opacity: 0, scale: 0.95 }}
+          animate={{ opacity: 1, scale: 1 }}
+          className="card p-10 max-w-md w-full text-center space-y-5"
+        >
+          <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} transition={{ type: 'spring', stiffness: 200 }}>
+            <CheckCircle className="w-20 h-20 text-emerald-500 mx-auto" />
+          </motion.div>
+          <h2 className="text-2xl font-bold text-slate-800">Check your inbox!</h2>
+          <p className="text-slate-500">
+            We sent a verification link to{' '}
+            <span className="font-semibold text-indigo-600">{registeredEmail}</span>.
+            <br />Click the link in the email to activate your account.
+          </p>
+          <p className="text-xs text-slate-400">Didn't get it? Check your spam folder.</p>
+          <div className="flex flex-col gap-2 pt-2">
+            <button
+              onClick={async () => {
+                try { await api.post('/auth/resend-verification', { email: registeredEmail }); }
+                catch {}
+              }}
+              className="text-sm text-indigo-600 hover:text-indigo-700 font-medium"
+            >
+              Resend verification email
+            </button>
+            <Link to="/login" className="text-sm text-slate-500 hover:text-slate-700">
+              Back to Login
+            </Link>
+          </div>
+        </motion.div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-purple-50 flex items-center justify-center p-4">
