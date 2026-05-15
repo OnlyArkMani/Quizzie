@@ -54,7 +54,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            libsndfile1 ffmpeg libgl1-mesa-glx
+            libsndfile1 ffmpeg libgl1 libglib2.0-0
 
       - name: Install Python dependencies
         working-directory: backend
@@ -126,17 +126,17 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     steps:
-      - name: Deploy Backend → Render
+      - name: Deploy Backend to Render
         run: |
           curl -s -o /dev/null -w "%{http_code}" \
             -X POST "${{ secrets.RENDER_BACKEND_DEPLOY_HOOK }}" \
-            | grep -q "^2" && echo "✅ Backend deploy triggered" || echo "❌ Backend deploy failed"
+            | grep -q "^2" && echo "Backend deploy triggered" || echo "Backend deploy failed"
 
-      - name: Deploy Frontend → Render
+      - name: Deploy Frontend to Render
         run: |
           curl -s -o /dev/null -w "%{http_code}" \
             -X POST "${{ secrets.RENDER_FRONTEND_DEPLOY_HOOK }}" \
-            | grep -q "^2" && echo "✅ Frontend deploy triggered" || echo "❌ Frontend deploy failed"
+            | grep -q "^2" && echo "Frontend deploy triggered" || echo "Frontend deploy failed"
 
       - name: Notify success
-        run: echo "🚀 Quizzie deployed successfully from commit ${{ github.sha }}"
+        run: echo "Quizzie deployed from commit ${{ github.sha }}"
