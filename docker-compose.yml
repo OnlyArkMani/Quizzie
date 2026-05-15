@@ -17,8 +17,20 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    # Not exposed to host in production — only backend can reach it
-    # expose: ["5432"]
+
+  # ─── Redis ────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: quizzie_redis
+    restart: unless-stopped
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # ─── Backend (FastAPI) ─────────────────────────────────────────────────────
   backend:
@@ -29,13 +41,53 @@ services:
     restart: unless-stopped
     env_file: ./backend/.env
     environment:
-      # Overrides .env so it uses the Docker service name, not localhost
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres123}@postgres:5432/${POSTGRES_DB:-quizzie_db}
+      REDIS_URL: redis://redis:6379/0
+      WORKERS: "4"
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     ports:
-      - "8000:8000"    # expose for direct API access / testing; remove in prod if frontend proxies
+      - "8000:8000"
+
+  # ─── Celery Worker: Proctoring (AI) ───────────────────────────────────────
+  # Separate from web process — MediaPipe loads ONLY here, not in FastAPI
+  celery_proctoring:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: quizzie_celery_proctoring
+    restart: unless-stopped
+    command: celery -A app.worker.celery_app worker -Q proctoring --concurrency=4 --loglevel=info
+    env_file: ./backend/.env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres123}@postgres:5432/${POSTGRES_DB:-quizzie_db}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ─── Celery Worker: Evaluation ─────────────────────────────────────────────
+  celery_evaluation:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: quizzie_celery_evaluation
+    restart: unless-stopped
+    command: celery -A app.worker.celery_app worker -Q evaluation --concurrency=2 --loglevel=info
+    env_file: ./backend/.env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres123}@postgres:5432/${POSTGRES_DB:-quizzie_db}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   # ─── Frontend (React → nginx) ──────────────────────────────────────────────
   frontend:

@@ -1,60 +1,122 @@
-# render.yaml — One-click deploy blueprint for Render.com
+# render.yaml — Quizzie full production deployment
 # Docs: https://render.com/docs/blueprint-spec
 
-databases:
-  - name: quizzie-db
-    databaseName: quizzie_db
-    user: quizzie_user
-    plan: free          # free tier: 1 GB storage, shared CPU
-
 services:
-  # ── Backend ────────────────────────────────────────────────────────────────
+  # ── Backend API (FastAPI) ────────────────────────────────────────────────
   - type: web
-    name: quizzie-backend
+    name: quizzie-api
     runtime: docker
     dockerfilePath: ./backend/Dockerfile
     dockerContext: ./backend
-    plan: free
+    plan: standard           # 2 GB RAM, 1 vCPU — handles 500+ concurrent students
     healthCheckPath: /health
     envVars:
       - key: DATABASE_URL
         fromDatabase:
-          name: quizzie-db
+          name: quizzie-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: quizzie-redis
+          type: redis
           property: connectionString
       - key: SECRET_KEY
-        generateValue: true         # Render auto-generates a secure random value
-      - key: ALGORITHM
-        value: HS256
-      - key: ACCESS_TOKEN_EXPIRE_MINUTES
-        value: "60"
+        generateValue: true
       - key: ENVIRONMENT
         value: production
+      - key: WORKERS
+        value: "5"           # (2 × 2 vCPU cores) + 1
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: "120"
       - key: CORS_ORIGINS
-        sync: false                 # Set manually in Render dashboard
-      - key: FRONTEND_URL
-        sync: false                 # e.g. https://quizzie-frontend.onrender.com
+        value: "https://quizzie.onrender.com"
       - key: SMTP_HOST
-        value: smtp.gmail.com
+        sync: false
       - key: SMTP_PORT
         value: "587"
       - key: SMTP_USERNAME
-        sync: false                 # Set in Render dashboard (your Gmail)
+        sync: false
       - key: SMTP_PASSWORD
-        sync: false                 # Set in Render dashboard (App Password)
+        sync: false
       - key: EMAIL_FROM
         sync: false
-      - key: EMAIL_FROM_NAME
-        value: Quizzie
+      - key: FRONTEND_URL
+        value: "https://quizzie.onrender.com"
+    autoDeploy: true
 
-  # ── Frontend ───────────────────────────────────────────────────────────────
+  # ── Celery Worker: Proctoring (AI frame/audio analysis) ─────────────────
+  - type: worker
+    name: quizzie-celery-proctoring
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: standard           # Needs CPU for MediaPipe — keep separate from API
+    startCommand: celery -A app.worker.celery_app worker -Q proctoring --concurrency=4 --loglevel=info
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: quizzie-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: quizzie-redis
+          type: redis
+          property: connectionString
+      - key: SECRET_KEY
+        fromService:
+          name: quizzie-api
+          type: web
+          envVarKey: SECRET_KEY
+    autoDeploy: true
+
+  # ── Celery Worker: Evaluation (score calculation) ────────────────────────
+  - type: worker
+    name: quizzie-celery-evaluation
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    plan: starter
+    startCommand: celery -A app.worker.celery_app worker -Q evaluation --concurrency=2 --loglevel=info
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: quizzie-postgres
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: quizzie-redis
+          type: redis
+          property: connectionString
+      - key: SECRET_KEY
+        fromService:
+          name: quizzie-api
+          type: web
+          envVarKey: SECRET_KEY
+    autoDeploy: true
+
+  # ── Frontend (React → Nginx static) ─────────────────────────────────────
   - type: web
-    name: quizzie-frontend
+    name: quizzie
     runtime: docker
     dockerfilePath: ./frontend/Dockerfile
     dockerContext: ./frontend
-    plan: free
+    plan: starter
     envVars:
-      - key: VITE_API_URL
-        value: ""   # Leave blank — nginx proxies /api/ to backend internally
       - key: BACKEND_URL
-        value: "http://quizzie-backend:10000"  # Render internal hostname for the backend service
+        fromService:
+          name: quizzie-api
+          type: web
+          property: host
+    autoDeploy: true
+
+  # ── Redis (Celery broker + cache) ────────────────────────────────────────
+  - type: redis
+    name: quizzie-redis
+    plan: starter            # 25 MB — more than enough for Celery queue + cache
+    maxmemoryPolicy: allkeys-lru
+
+databases:
+  # ── PostgreSQL ───────────────────────────────────────────────────────────
+  - name: quizzie-postgres
+    databaseName: quizzie_db
+    plan: standard           # 4 GB RAM, 256 connections — production grade
