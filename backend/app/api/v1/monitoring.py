@@ -1,20 +1,33 @@
+"""
+Proctoring API — v2 (async Celery-backed)
+
+Frame and audio uploads return immediately (202 Accepted).
+The actual AI analysis runs in a Celery worker process, keeping the
+FastAPI event loop free for hundreds of concurrent students.
+"""
+import base64
+import logging
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from uuid import UUID
+
 from app.core.database import get_db
 from app.models.user import User
 from app.models.attempt import ExamAttempt
 from app.models.cheat_log import CheatLog
 from app.api.deps import get_current_user, require_role
-from app.ai_monitor.face_detector import FaceDetector
-from app.ai_monitor.audio_analyzer import AudioAnalyzer
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
-face_detector = FaceDetector()
-audio_analyzer = AudioAnalyzer()
 
-@router.post("/frame")
+def _get_celery():
+    """Lazy import so the web process never loads MediaPipe."""
+    from app.worker.tasks.proctoring_tasks import analyze_frame_task, analyze_audio_task
+    return analyze_frame_task, analyze_audio_task
+
+
+@router.post("/frame", status_code=status.HTTP_202_ACCEPTED)
 async def analyze_frame(
     attempt_id: UUID = Form(...),
     file: UploadFile = File(...),
@@ -22,65 +35,28 @@ async def analyze_frame(
     current_user: User = Depends(require_role(["student"]))
 ):
     """
-    Analyze webcam frame for cheating detection
+    Accept a webcam frame and enqueue AI analysis.
+    Returns 202 immediately — result is persisted by the Celery worker.
     """
     attempt = db.query(ExamAttempt).filter(ExamAttempt.id == attempt_id).first()
-    
     if not attempt:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Attempt not found"
-        )
-    
-    if attempt.student_id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized"
-        )
-    
-    # Read image bytes
+        raise HTTPException(status_code=404, detail="Attempt not found")
+    if str(attempt.student_id) != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
     image_bytes = await file.read()
-    
-    # Analyze frame
-    result = face_detector.analyze_frame(image_bytes)
-    
-    # Log flags if any
-    if result['flags']:
-        from app.models.cheat_log import CheatSeverity
-        for flag in result['flags']:
-            # flags are now dicts: {type, severity, message}
-            if isinstance(flag, dict):
-                flag_type = flag.get('type', 'unknown')
-                raw_severity = flag.get('severity', 'low')
-            else:
-                flag_type = str(flag)
-                raw_severity = result.get('severity', 'low')
+    image_b64 = base64.b64encode(image_bytes).decode()
 
-            try:
-                valid_severity = CheatSeverity(raw_severity)
-            except ValueError:
-                valid_severity = CheatSeverity.LOW
+    analyze_frame_task, _ = _get_celery()
+    task = analyze_frame_task.apply_async(
+        args=[str(attempt_id), image_b64],
+        queue="proctoring",
+    )
 
-            log = CheatLog(
-                attempt_id=attempt_id,
-                flag_type=flag_type,
-                severity=valid_severity,
-                meta_data={
-                    'num_faces': result.get('num_faces', 0),
-                    'message': flag.get('message', '') if isinstance(flag, dict) else ''
-                }
-            )
-            db.add(log)
-        
-        # Increment cheating flags count safely
-        current_flags = attempt.cheating_flags or 0
-        attempt.cheating_flags = current_flags + len(result['flags'])
-        
-        db.commit()
-    
-    return result
+    return {"queued": True, "task_id": task.id}
 
-@router.post("/audio")
+
+@router.post("/audio", status_code=status.HTTP_202_ACCEPTED)
 async def analyze_audio(
     attempt_id: UUID = Form(...),
     file: UploadFile = File(...),
@@ -88,54 +64,26 @@ async def analyze_audio(
     current_user: User = Depends(require_role(["student"]))
 ):
     """
-    Analyze audio for cheating detection
+    Accept an audio chunk and enqueue AI analysis.
+    Returns 202 immediately.
     """
     attempt = db.query(ExamAttempt).filter(ExamAttempt.id == attempt_id).first()
-    
     if not attempt:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Attempt not found"
-        )
-    
-    if attempt.student_id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized"
-        )
-    
-    # Read audio bytes
-    audio_bytes = await file.read()
-    
-    # Analyze audio
-    result = audio_analyzer.analyze_audio(audio_bytes)
-    
-    # Log flags if any
-    if result['flags']:
-        from app.models.cheat_log import CheatSeverity
-        for flag in result['flags']:
-            # Validate or cast severity safely
-            raw_severity = result.get('severity', 'low')
-            try:
-                valid_severity = CheatSeverity(raw_severity)
-            except ValueError:
-                valid_severity = CheatSeverity.LOW
+        raise HTTPException(status_code=404, detail="Attempt not found")
+    if str(attempt.student_id) != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Not authorized")
 
-            log = CheatLog(
-                attempt_id=attempt_id,
-                flag_type=flag,
-                severity=valid_severity,
-                meta_data={'rms_energy': float(result.get('rms_energy', 0))}
-            )
-            db.add(log)
-        
-        # Increment cheating flags count safely
-        current_flags = attempt.cheating_flags or 0
-        attempt.cheating_flags = current_flags + len(result['flags'])
-        
-        db.commit()
-    
-    return result
+    audio_bytes = await file.read()
+    audio_b64 = base64.b64encode(audio_bytes).decode()
+
+    _, analyze_audio_task = _get_celery()
+    task = analyze_audio_task.apply_async(
+        args=[str(attempt_id), audio_b64],
+        queue="proctoring",
+    )
+
+    return {"queued": True, "task_id": task.id}
+
 
 @router.get("/flags/{attempt_id}", response_model=list)
 def get_cheat_flags(
@@ -143,33 +91,22 @@ def get_cheat_flags(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Get all cheat flags for an attempt
-    """
+    """Get all cheat flags for an attempt."""
     attempt = db.query(ExamAttempt).filter(ExamAttempt.id == attempt_id).first()
-    
     if not attempt:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Attempt not found"
-        )
-    
-    # Check permissions
-    if current_user.role == "student" and attempt.student_id != current_user.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authorized"
-        )
-    
+        raise HTTPException(status_code=404, detail="Attempt not found")
+
+    if current_user.role == "student" and str(attempt.student_id) != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
     logs = db.query(CheatLog).filter(CheatLog.attempt_id == attempt_id).all()
-    
     return [
         {
-            'id': str(log.id),
-            'flag_type': log.flag_type,
-            'severity': log.severity,
-            'timestamp': log.timestamp.isoformat(),
-            'metadata': log.meta_data  # Return as 'metadata' to frontend
+            "id": str(log.id),
+            "flag_type": log.flag_type,
+            "severity": log.severity,
+            "timestamp": log.timestamp.isoformat(),
+            "metadata": log.meta_data,
         }
         for log in logs
     ]

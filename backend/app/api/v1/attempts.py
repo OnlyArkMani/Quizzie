@@ -1,4 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+"""
+Attempts API — exam start, submit, results, auto-save.
+Submit now dispatches evaluation to Celery so the HTTP response is instant.
+"""
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 from typing import List
@@ -6,10 +10,11 @@ from uuid import UUID
 from pydantic import BaseModel
 
 from app.core.database import get_db
+from app.core.cache import cache, key_leaderboard
 from app.models.user import User
-from app.models.exam import Exam
+from app.models.exam import Exam, ExamStatus
 from app.models.attempt import ExamAttempt, Response, AttemptStatus
-from app.models.question import Question, Option
+from app.models.question import Question
 from app.schemas.response import AttemptCreate, AttemptSubmit, Attempt as AttemptSchema
 from app.api.deps import get_current_user, require_role
 from app.services.evaluation_service import EvaluationService
@@ -17,7 +22,6 @@ from app.services.evaluation_service import EvaluationService
 router = APIRouter()
 
 
-# FIX Bug 6: Proper Pydantic body model for auto-save
 class AutoSaveBody(BaseModel):
     responses: List[dict]
 
@@ -28,101 +32,96 @@ def start_exam(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(["student"]))
 ):
-    """Start a new exam attempt (Student only)"""
     exam = db.query(Exam).filter(Exam.id == attempt_data.exam_id).first()
-
     if not exam:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found")
+        raise HTTPException(status_code=404, detail="Exam not found")
+    if exam.status != ExamStatus.LIVE:
+        raise HTTPException(status_code=400, detail="Exam is not live")
 
-    if exam.status != "live":
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Exam is not live")
-
-    # Auto-abandon old in-progress attempts (older than 24 hours)
     cutoff_time = datetime.utcnow() - timedelta(hours=24)
 
-    old_attempts = db.query(ExamAttempt).filter(
+    # Abandon stale in-progress attempts
+    db.query(ExamAttempt).filter(
         ExamAttempt.exam_id == attempt_data.exam_id,
         ExamAttempt.student_id == current_user.id,
-        # FIX Bug 10: Use enum value
         ExamAttempt.status == AttemptStatus.IN_PROGRESS,
-        ExamAttempt.started_at < cutoff_time
-    ).all()
+        ExamAttempt.started_at < cutoff_time,
+    ).update({"status": AttemptStatus.SUBMITTED})
 
-    for attempt in old_attempts:
-        attempt.status = "abandoned"
-
-    # Check for recent in-progress attempt
-    recent_attempt = db.query(ExamAttempt).filter(
+    # Resume existing attempt if within 24 hours
+    existing = db.query(ExamAttempt).filter(
         ExamAttempt.exam_id == attempt_data.exam_id,
         ExamAttempt.student_id == current_user.id,
-        # FIX Bug 10: Use enum value
         ExamAttempt.status == AttemptStatus.IN_PROGRESS,
-        ExamAttempt.started_at >= cutoff_time
+        ExamAttempt.started_at >= cutoff_time,
     ).first()
+    if existing:
+        return existing
 
-    if recent_attempt:
-        return recent_attempt
-
-    # Create new attempt
     new_attempt = ExamAttempt(
         exam_id=attempt_data.exam_id,
         student_id=current_user.id,
-        # FIX Bug 10: Use enum value
-        status=AttemptStatus.IN_PROGRESS
+        status=AttemptStatus.IN_PROGRESS,
     )
-
     db.add(new_attempt)
     db.commit()
     db.refresh(new_attempt)
-
     return new_attempt
 
 
 @router.post("/{attempt_id}/submit", response_model=dict)
-def submit_exam(
+async def submit_exam(
     attempt_id: UUID,
     submission: AttemptSubmit,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(["student"]))
 ):
-    """Submit exam attempt (Student only)"""
     attempt = db.query(ExamAttempt).filter(ExamAttempt.id == attempt_id).first()
-
     if not attempt:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attempt not found")
-
+        raise HTTPException(status_code=404, detail="Attempt not found")
     if str(attempt.student_id) != str(current_user.id):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+        raise HTTPException(status_code=403, detail="Not authorized")
 
-    # FIX Bug 10: Robust enum check
-    status_val = attempt.status.value if hasattr(attempt.status, 'value') else attempt.status
+    status_val = attempt.status.value if hasattr(attempt.status, "value") else attempt.status
     if status_val != AttemptStatus.IN_PROGRESS.value:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Attempt already submitted")
+        raise HTTPException(status_code=400, detail="Attempt already submitted")
 
-    # Save responses
-    for response_data in submission.responses:
-        response = Response(
+    # Persist responses
+    for rd in submission.responses:
+        db.add(Response(
             attempt_id=attempt_id,
-            question_id=response_data.question_id,
-            selected_option_ids=response_data.selected_option_ids,
-            marked_for_review=response_data.marked_for_review
-        )
-        db.add(response)
+            question_id=rd.question_id,
+            selected_option_ids=rd.selected_option_ids,
+            marked_for_review=rd.marked_for_review,
+        ))
 
-    # Update attempt
     attempt.submitted_at = datetime.utcnow()
-    time_taken = (attempt.submitted_at - attempt.started_at).total_seconds()
-    attempt.time_taken_seconds = int(time_taken)
-    # FIX Bug 10: Use enum value
+    attempt.time_taken_seconds = int((attempt.submitted_at - attempt.started_at).total_seconds())
     attempt.status = AttemptStatus.SUBMITTED
-
     db.commit()
 
-    # Evaluate
-    evaluation_service = EvaluationService(db)
-    result = evaluation_service.evaluate_attempt(attempt_id)
-
-    return result
+    # Dispatch evaluation to Celery worker (non-blocking)
+    # Falls back to synchronous evaluation if Celery/Redis unavailable
+    try:
+        from app.worker.tasks.evaluation_tasks import evaluate_attempt_task
+        task = evaluate_attempt_task.apply_async(
+            args=[str(attempt_id)],
+            queue="evaluation",
+        )
+        # Invalidate leaderboard cache for this exam
+        await cache.delete(key_leaderboard(str(attempt.exam_id)))
+        return {
+            "message": "Exam submitted. Results will be ready shortly.",
+            "attempt_id": str(attempt_id),
+            "task_id": task.id,
+            "status": "evaluating",
+        }
+    except Exception:
+        # Synchronous fallback — works without Celery (dev mode)
+        svc = EvaluationService(db)
+        result = svc.evaluate_attempt(attempt_id)
+        await cache.delete(key_leaderboard(str(attempt.exam_id)))
+        return result
 
 
 @router.get("/{attempt_id}/results", response_model=dict)
@@ -131,48 +130,43 @@ def get_results(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """Get exam results"""
     attempt = db.query(ExamAttempt).filter(ExamAttempt.id == attempt_id).first()
-
     if not attempt:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Attempt not found")
+        raise HTTPException(status_code=404, detail="Attempt not found")
 
     exam = db.query(Exam).filter(Exam.id == attempt.exam_id).first()
+    role = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
 
-    if current_user.role == "student" and str(attempt.student_id) != str(current_user.id):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
-    elif current_user.role == "examiner" and str(exam.created_by) != str(current_user.id):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+    if role == "student" and str(attempt.student_id) != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    elif role == "examiner" and str(exam.created_by) != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Not authorized")
 
-    # FIX Bug 10: Use enum value
-    status_val = attempt.status.value if hasattr(attempt.status, 'value') else attempt.status
+    status_val = attempt.status.value if hasattr(attempt.status, "value") else attempt.status
+    if status_val == AttemptStatus.SUBMITTED.value:
+        return {"status": "evaluating", "message": "Results are being processed. Please check back in a moment."}
     if status_val != AttemptStatus.EVALUATED.value:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Results not ready yet")
+        raise HTTPException(status_code=400, detail="Results not ready yet")
 
     responses = db.query(Response).filter(Response.attempt_id == attempt_id).all()
-    topic_wise = {}
+    obtained_marks = sum(r.marks_awarded for r in responses if r.marks_awarded)
 
-    for response in responses:
-        question = db.query(Question).filter(Question.id == response.question_id).first()
-        if question and question.topic:
-            if question.topic not in topic_wise:
-                topic_wise[question.topic] = {"correct": 0, "total": 0}
-            topic_wise[question.topic]["total"] += 1
-            if response.is_correct:
-                topic_wise[question.topic]["correct"] += 1
-
-    for topic in topic_wise:
-        total = topic_wise[topic]["total"]
-        correct = topic_wise[topic]["correct"]
-        topic_wise[topic]["percentage"] = (correct / total * 100) if total > 0 else 0
-
-    obtained_marks = sum([r.marks_awarded for r in responses if r.marks_awarded])
+    # topic-wise (responses already in memory — no extra query)
+    topic_wise: dict = {}
+    for r in responses:
+        q = db.query(Question).filter(Question.id == r.question_id).first()
+        if q and q.topic:
+            if q.topic not in topic_wise:
+                topic_wise[q.topic] = {"correct": 0, "total": 0}
+            topic_wise[q.topic]["total"] += 1
+            if r.is_correct:
+                topic_wise[q.topic]["correct"] += 1
 
     return {
         "score": float(attempt.score),
         "obtained_marks": float(obtained_marks),
         "total_marks": exam.total_marks,
-        "correct_count": sum([1 for r in responses if r.is_correct]),
+        "correct_count": sum(1 for r in responses if r.is_correct),
         "total_questions": len(responses),
         "time_taken_seconds": attempt.time_taken_seconds,
         "cheating_flags": attempt.cheating_flags,
@@ -187,27 +181,23 @@ def get_my_attempts(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(["student"]))
 ):
-    """Get student's exam attempts"""
-    attempts = db.query(ExamAttempt).filter(
-        ExamAttempt.student_id == current_user.id
-    ).order_by(ExamAttempt.started_at.desc()).limit(limit).all()
+    return (
+        db.query(ExamAttempt)
+        .filter(ExamAttempt.student_id == current_user.id)
+        .order_by(ExamAttempt.started_at.desc())
+        .limit(limit)
+        .all()
+    )
 
-    return attempts
 
-
-@router.post("/{attempt_id}/auto-save", status_code=status.HTTP_200_OK)
+@router.post("/{attempt_id}/auto-save", status_code=200)
 def auto_save_progress(
     attempt_id: UUID,
-    # FIX Bug 6: Use proper Pydantic model instead of bare List[dict]
     body: AutoSaveBody,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(["student"]))
 ):
-    """Auto-save exam progress"""
     attempt = db.query(ExamAttempt).filter(ExamAttempt.id == attempt_id).first()
-
     if not attempt or str(attempt.student_id) != str(current_user.id):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
-
-    # Optionally persist responses here in future
+        raise HTTPException(status_code=403, detail="Not authorized")
     return {"message": "Progress saved", "saved": len(body.responses)}
