@@ -2,7 +2,6 @@ from pydantic_settings import BaseSettings
 from pydantic import field_validator
 from typing import List, Union
 
-# Dev origins always allowed — these never break local development
 _DEV_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
@@ -16,12 +15,15 @@ class Settings(BaseSettings):
     # Database
     DATABASE_URL: str = "postgresql://postgres:postgres123@localhost:5432/quizzie_db"
 
+    # Redis
+    REDIS_URL: str = "redis://localhost:6379/0"
+
     # Security
     SECRET_KEY: str = "09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7"
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 120   # 2 hours — safe for long exams
 
-    # CORS — comma-separated string from env, e.g. "https://myapp.com,https://api.myapp.com"
+    # CORS
     CORS_ORIGINS: Union[List[str], str] = ""
 
     @field_validator("CORS_ORIGINS", mode="before")
@@ -35,7 +37,6 @@ class Settings(BaseSettings):
 
     @property
     def all_cors_origins(self) -> List[str]:
-        """Dev origins + any extra origins from CORS_ORIGINS env var, deduplicated."""
         extra = self.CORS_ORIGINS if isinstance(self.CORS_ORIGINS, list) else []
         combined = _DEV_ORIGINS + [o for o in extra if o not in _DEV_ORIGINS]
         return combined
@@ -55,6 +56,11 @@ class Settings(BaseSettings):
     SMTP_PASSWORD: str = ""
     EMAIL_FROM: str = ""
     EMAIL_FROM_NAME: str = "Quizzie"
+
+    # Cache TTLs (seconds)
+    CACHE_TTL_EXAM_QUESTIONS: int = 300     # 5 min — questions rarely change during live exam
+    CACHE_TTL_EXAM_META: int = 60           # 1 min — exam status
+    CACHE_TTL_LEADERBOARD: int = 30         # 30 sec — leaderboard
 
     class Config:
         env_file = ".env"
