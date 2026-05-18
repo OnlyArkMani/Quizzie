@@ -1,9 +1,9 @@
 """
-Proctoring API — v2 (async Celery-backed)
+Proctoring API — v2 (async Celery-backed, with sync fallback)
 
-Frame and audio uploads return immediately (202 Accepted).
-The actual AI analysis runs in a Celery worker process, keeping the
-FastAPI event loop free for hundreds of concurrent students.
+Frame and audio uploads return immediately (202 Accepted) when Celery/Redis
+is available. If Redis is down (e.g. local dev without Docker), the analysis
+runs synchronously in-process and returns 200 so the API never hard-crashes.
 """
 import base64
 import logging
@@ -27,7 +27,33 @@ def _get_celery():
     return analyze_frame_task, analyze_audio_task
 
 
-@router.post("/frame", status_code=status.HTTP_202_ACCEPTED)
+def _run_frame_sync(attempt_id: str, image_b64: str) -> dict:
+    """Synchronous fallback: run face detection in-process (no Celery needed)."""
+    from app.ai_monitor.face_detector import FaceDetector
+    from app.worker.tasks.proctoring_tasks import _persist_flags
+
+    result = FaceDetector().analyze_frame(base64.b64decode(image_b64))
+    if result.get("flags"):
+        _persist_flags(attempt_id, result["flags"])
+    return result
+
+
+def _run_audio_sync(attempt_id: str, audio_b64: str) -> dict:
+    """Synchronous fallback: run audio analysis in-process (no Celery needed)."""
+    from app.ai_monitor.audio_analyzer import AudioAnalyzer
+    from app.worker.tasks.proctoring_tasks import _persist_flags
+
+    result = AudioAnalyzer().analyze_audio(base64.b64decode(audio_b64))
+    if result.get("flags"):
+        flags_as_dicts = [
+            {"type": f, "severity": result.get("severity", "medium"), "message": f}
+            for f in result["flags"]
+        ]
+        _persist_flags(attempt_id, flags_as_dicts)
+    return result
+
+
+@router.post("/frame")
 async def analyze_frame(
     attempt_id: UUID = Form(...),
     file: UploadFile = File(...),
@@ -36,7 +62,7 @@ async def analyze_frame(
 ):
     """
     Accept a webcam frame and enqueue AI analysis.
-    Returns 202 immediately — result is persisted by the Celery worker.
+    Returns 202 when queued via Celery, 200 when run synchronously (no Redis).
     """
     attempt = db.query(ExamAttempt).filter(ExamAttempt.id == attempt_id).first()
     if not attempt:
@@ -46,17 +72,33 @@ async def analyze_frame(
 
     image_bytes = await file.read()
     image_b64 = base64.b64encode(image_bytes).decode()
+    attempt_id_str = str(attempt_id)
 
-    analyze_frame_task, _ = _get_celery()
-    task = analyze_frame_task.apply_async(
-        args=[str(attempt_id), image_b64],
-        queue="proctoring",
-    )
+    # Try async Celery path first
+    try:
+        analyze_frame_task, _ = _get_celery()
+        task = analyze_frame_task.apply_async(
+            args=[attempt_id_str, image_b64],
+            queue="proctoring",
+        )
+        return {"queued": True, "task_id": task.id, "status_code": 202}
+    except Exception as celery_err:
+        # Redis unavailable (local dev) — fall back to synchronous analysis
+        logger.warning(
+            "Celery unavailable (%s), running frame analysis synchronously for attempt %s",
+            type(celery_err).__name__,
+            attempt_id_str,
+        )
 
-    return {"queued": True, "task_id": task.id}
+    try:
+        result = _run_frame_sync(attempt_id_str, image_b64)
+        return {"queued": False, "sync": True, "result": result}
+    except Exception as sync_err:
+        logger.exception("Sync frame analysis failed for attempt %s", attempt_id_str)
+        raise HTTPException(status_code=500, detail=f"Frame analysis failed: {sync_err}")
 
 
-@router.post("/audio", status_code=status.HTTP_202_ACCEPTED)
+@router.post("/audio")
 async def analyze_audio(
     attempt_id: UUID = Form(...),
     file: UploadFile = File(...),
@@ -65,7 +107,7 @@ async def analyze_audio(
 ):
     """
     Accept an audio chunk and enqueue AI analysis.
-    Returns 202 immediately.
+    Returns 202 when queued via Celery, 200 when run synchronously (no Redis).
     """
     attempt = db.query(ExamAttempt).filter(ExamAttempt.id == attempt_id).first()
     if not attempt:
@@ -75,14 +117,28 @@ async def analyze_audio(
 
     audio_bytes = await file.read()
     audio_b64 = base64.b64encode(audio_bytes).decode()
+    attempt_id_str = str(attempt_id)
 
-    _, analyze_audio_task = _get_celery()
-    task = analyze_audio_task.apply_async(
-        args=[str(attempt_id), audio_b64],
-        queue="proctoring",
-    )
+    try:
+        _, analyze_audio_task = _get_celery()
+        task = analyze_audio_task.apply_async(
+            args=[attempt_id_str, audio_b64],
+            queue="proctoring",
+        )
+        return {"queued": True, "task_id": task.id, "status_code": 202}
+    except Exception as celery_err:
+        logger.warning(
+            "Celery unavailable (%s), running audio analysis synchronously for attempt %s",
+            type(celery_err).__name__,
+            attempt_id_str,
+        )
 
-    return {"queued": True, "task_id": task.id}
+    try:
+        result = _run_audio_sync(attempt_id_str, audio_b64)
+        return {"queued": False, "sync": True, "result": result}
+    except Exception as sync_err:
+        logger.exception("Sync audio analysis failed for attempt %s", attempt_id_str)
+        raise HTTPException(status_code=500, detail=f"Audio analysis failed: {sync_err}")
 
 
 @router.get("/flags/{attempt_id}", response_model=list)
