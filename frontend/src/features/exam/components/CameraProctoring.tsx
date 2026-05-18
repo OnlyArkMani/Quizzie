@@ -54,8 +54,10 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
   const videoRef    = useRef<HTMLVideoElement>(null);
   const canvasRef   = useRef<HTMLCanvasElement>(null);
   const streamRef   = useRef<MediaStream | null>(null);
-  const detectionIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const recoveryIntervalRef  = useRef<ReturnType<typeof setInterval> | null>(null);
+  // FIX: Use number (browser timer ID) instead of ReturnType<typeof setInterval>
+  // which resolves to NodeJS.Timeout when @types/node is in scope → TS2503 error.
+  const detectionIntervalRef = useRef<number | null>(null);
+  const recoveryIntervalRef  = useRef<number | null>(null);
 
   // Strike tracking: maps violation type -> consecutive count
   const strikesRef  = useRef<Record<string, number>>({});
@@ -72,7 +74,8 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
 
   // Warning overlay state
   const [warningOverlay, setWarningOverlay] = useState<{ message: string; type: string } | null>(null);
-  const warningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // FIX: Use number for browser setTimeout return type
+  const warningTimerRef = useRef<number | null>(null);
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
 
@@ -80,7 +83,7 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
   useEffect(() => {
     if (!isActive) return;
     gracePeriodActiveRef.current = true;
-    const t = setTimeout(() => {
+    const t = window.setTimeout(() => {
       gracePeriodActiveRef.current = false;
     }, GRACE_PERIOD_MS);
     return () => clearTimeout(t);
@@ -89,7 +92,7 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
   // ── Health recovery: restore 3 HP every 60 s of clean behaviour ───────
   useEffect(() => {
     if (!isActive || !attemptId) return;
-    recoveryIntervalRef.current = setInterval(async () => {
+    recoveryIntervalRef.current = window.setInterval(async () => {
       if (cleanStreakRef.current >= 3) {  // at least 3 clean frames in row
         try {
           await api.post('/monitor/enhanced/recover', { attempt_id: attemptId, amount: 3 });
@@ -139,7 +142,7 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
       return;
     }
     const interval = settings.detection_interval * 1000;
-    detectionIntervalRef.current = setInterval(() => captureAndAnalyzeFrame(), interval);
+    detectionIntervalRef.current = window.setInterval(() => captureAndAnalyzeFrame(), interval);
     captureAndAnalyzeFrame();
     return () => { if (detectionIntervalRef.current) { clearInterval(detectionIntervalRef.current); detectionIntervalRef.current = null; } };
   }, [cameraReady, isActive, settings.face_detection_enabled, settings.detection_interval]);
@@ -172,7 +175,7 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
         : `⚠️ Warning: ${violation.message} — next time will be penalised`,
       type: isPenalty ? 'penalty' : 'warning',
     });
-    warningTimerRef.current = setTimeout(() => setWarningOverlay(null), 4000);
+    warningTimerRef.current = window.setTimeout(() => setWarningOverlay(null), 4000);
   };
 
   // ── Camera helpers ─────────────────────────────────────────────
@@ -204,8 +207,13 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
               formData.append('attempt_id', attemptId);
               formData.append('file', e.data, 'audio.webm');
               const res = await api.post('/monitor/audio', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
-              if (res.data.flags?.length > 0) {
-                res.data.flags.forEach((flag: any) => {
+              const data = res.data;
+              if (data.queued) return; // Processed asynchronously
+              
+              const result = data.sync ? data.result : data;
+              
+              if (result?.flags?.length > 0) {
+                result.flags.forEach((flag: any) => {
                   const v = typeof flag === 'string'
                     ? { type: flag, severity: 'medium', message: flag.replace(/_/g, ' ') }
                     : flag;
@@ -251,7 +259,16 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
           formData.append('attempt_id', attemptId);
           formData.append('file', blob, 'frame.jpg');
           const response = await api.post('/monitor/frame', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
-          const result: DetectionResult = response.data;
+          
+          // Handle v2 API response which wraps the result
+          const data = response.data;
+          if (data.queued) {
+            setFrameCount(prev => prev + 1);
+            return; // Stats will be processed asynchronously
+          }
+          
+          const result: DetectionResult = data.sync ? data.result : data;
+          
           setLastDetection(result);
           setFrameCount(prev => prev + 1);
 
@@ -484,4 +501,3 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
 };
 
 export default CameraProctoring;
-

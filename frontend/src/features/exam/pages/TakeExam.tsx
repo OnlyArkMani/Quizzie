@@ -54,6 +54,7 @@ const TakeExam = () => {
   const examPausedRef                           = useRef(false);
 
   const hasSubmittedRef = useRef(false);
+  const healthZeroTriggeredRef = useRef(false);
   const answersRef      = useRef(answers);
 
   useEffect(() => { answersRef.current = answers; }, [answers]);
@@ -276,15 +277,22 @@ const TakeExam = () => {
       await api.post(`/attempts/${attemptId}/submit`, { responses });
       submitExam();
       navigate(`/student/exam/${examId}/results`, { state: { attemptId } });
-    } catch {
-      addToast('Failed to submit exam.', 'error');
+    } catch (error: any) {
+      if (error?.response?.status === 400 && error.response.data?.detail === "Attempt already submitted") {
+        submitExam();
+        navigate(`/student/exam/${examId}/results`, { state: { attemptId } });
+        return;
+      }
+      addToast(error?.response?.data?.detail || 'Failed to submit exam.', 'error');
       hasSubmittedRef.current = false;
       setIsSubmitting(false);
-      setIsHealthZero(false);
+      // We don't reset health zero, to prevent infinite loops from the websocket
     }
   };
 
   const handleHealthZero = () => {
+    if (healthZeroTriggeredRef.current) return;
+    healthZeroTriggeredRef.current = true;
     setIsHealthZero(true);
     addToast('Your exam health reached zero. Auto-submitting.', 'error');
     confirmSubmit();
