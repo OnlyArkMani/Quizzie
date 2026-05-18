@@ -2,24 +2,35 @@
 Analytics endpoint tests — summary, leaderboard, student stats, export.
 """
 import pytest
-from unittest.mock import patch
-from datetime import timedelta
+from unittest.mock import patch, MagicMock
+
+_PATCH_TARGET = "app.api.v1.attempts.evaluate_attempt_task"
+
+
+def _make_mock_task():
+    m = MagicMock()
+    m.apply_async.side_effect = Exception("no celery broker in tests")
+    return m
 
 
 def _submit_attempt(client, student_headers, exam, question, correct_opt):
-    """Helper: start + submit an attempt with a correct answer."""
-    attempt_id = client.post("/api/v1/attempts/start",
-                             json={"exam_id": str(exam.id)},
-                             headers=student_headers).json()["id"]
-    with patch("app.api.v1.attempts.evaluate_attempt_task") as m:
-        m.apply_async.side_effect = Exception("no celery")
-        client.post(f"/api/v1/attempts/{attempt_id}/submit", json={
-            "responses": [{
+    """Helper: start + submit with a correct answer using sync fallback."""
+    attempt_id = client.post(
+        "/api/v1/attempts/start",
+        json={"exam_id": str(exam.id)},
+        headers=student_headers,
+    ).json()["id"]
+
+    with patch(_PATCH_TARGET, _make_mock_task()):
+        client.post(
+            f"/api/v1/attempts/{attempt_id}/submit",
+            json={"responses": [{
                 "question_id": str(question.id),
                 "selected_option_ids": [str(correct_opt.id)],
                 "marked_for_review": False,
-            }]
-        }, headers=student_headers)
+            }]},
+            headers=student_headers,
+        )
     return attempt_id
 
 
@@ -62,7 +73,7 @@ class TestAnalytics:
                        headers=student_headers)
         assert r.status_code == 403
 
-    def test_student_own_stats(self, client, student_headers, live_exam):
+    def test_student_own_stats(self, client, student_headers):
         r = client.get("/api/v1/analytics/student/me/stats",
                        headers=student_headers)
         assert r.status_code == 200
@@ -87,5 +98,5 @@ class TestAnalytics:
         assert r.status_code == 200
         assert "text/csv" in r.headers["content-type"]
         lines = r.text.strip().split("\n")
-        assert len(lines) >= 2   # header + at least one data row
+        assert len(lines) >= 2
         assert "Student Name" in lines[0]

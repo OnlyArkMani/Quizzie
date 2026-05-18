@@ -1,8 +1,8 @@
 """
 Attempts API — exam start, submit, results, auto-save.
-Submit now dispatches evaluation to Celery so the HTTP response is instant.
+Submit dispatches evaluation to Celery so the HTTP response is instant.
 """
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 from typing import List
@@ -18,6 +18,14 @@ from app.models.question import Question
 from app.schemas.response import AttemptCreate, AttemptSubmit, Attempt as AttemptSchema
 from app.api.deps import get_current_user, require_role
 from app.services.evaluation_service import EvaluationService
+
+# Module-level name — tests patch THIS via:
+#   patch("app.api.v1.attempts.evaluate_attempt_task")
+# Celery imports fine without a running broker; None only if the module itself is missing.
+try:
+    from app.worker.tasks.evaluation_tasks import evaluate_attempt_task
+except Exception:
+    evaluate_attempt_task = None
 
 router = APIRouter()
 
@@ -40,7 +48,6 @@ def start_exam(
 
     cutoff_time = datetime.utcnow() - timedelta(hours=24)
 
-    # Abandon stale in-progress attempts
     db.query(ExamAttempt).filter(
         ExamAttempt.exam_id == attempt_data.exam_id,
         ExamAttempt.student_id == current_user.id,
@@ -48,7 +55,6 @@ def start_exam(
         ExamAttempt.started_at < cutoff_time,
     ).update({"status": AttemptStatus.SUBMITTED})
 
-    # Resume existing attempt if within 24 hours
     existing = db.query(ExamAttempt).filter(
         ExamAttempt.exam_id == attempt_data.exam_id,
         ExamAttempt.student_id == current_user.id,
@@ -86,7 +92,6 @@ async def submit_exam(
     if status_val != AttemptStatus.IN_PROGRESS.value:
         raise HTTPException(status_code=400, detail="Attempt already submitted")
 
-    # Persist responses
     for rd in submission.responses:
         db.add(Response(
             attempt_id=attempt_id,
@@ -96,19 +101,23 @@ async def submit_exam(
         ))
 
     attempt.submitted_at = datetime.utcnow()
-    attempt.time_taken_seconds = int((attempt.submitted_at - attempt.started_at).total_seconds())
+    attempt.time_taken_seconds = int(
+        (attempt.submitted_at - attempt.started_at).total_seconds()
+    )
     attempt.status = AttemptStatus.SUBMITTED
     db.commit()
 
-    # Dispatch evaluation to Celery worker (non-blocking)
-    # Falls back to synchronous evaluation if Celery/Redis unavailable
+    # evaluate_attempt_task is the module-level name.
+    # Tests replace it via patch("app.api.v1.attempts.evaluate_attempt_task").
+    # We import the module itself so we always read the current binding, not a
+    # stale closure — this is the standard Python patch pattern.
+    import app.api.v1.attempts as _this_module
+    _task = _this_module.evaluate_attempt_task
+
     try:
-        from app.worker.tasks.evaluation_tasks import evaluate_attempt_task
-        task = evaluate_attempt_task.apply_async(
-            args=[str(attempt_id)],
-            queue="evaluation",
-        )
-        # Invalidate leaderboard cache for this exam
+        if _task is None:
+            raise RuntimeError("Celery not configured")
+        task = _task.apply_async(args=[str(attempt_id)], queue="evaluation")
         await cache.delete(key_leaderboard(str(attempt.exam_id)))
         return {
             "message": "Exam submitted. Results will be ready shortly.",
@@ -117,7 +126,7 @@ async def submit_exam(
             "status": "evaluating",
         }
     except Exception:
-        # Synchronous fallback — works without Celery (dev mode)
+        # Synchronous fallback — works in dev/test without a running broker
         svc = EvaluationService(db)
         result = svc.evaluate_attempt(attempt_id)
         await cache.delete(key_leaderboard(str(attempt.exam_id)))
@@ -144,14 +153,16 @@ def get_results(
 
     status_val = attempt.status.value if hasattr(attempt.status, "value") else attempt.status
     if status_val == AttemptStatus.SUBMITTED.value:
-        return {"status": "evaluating", "message": "Results are being processed. Please check back in a moment."}
+        return {
+            "status": "evaluating",
+            "message": "Results are being processed. Please check back in a moment.",
+        }
     if status_val != AttemptStatus.EVALUATED.value:
         raise HTTPException(status_code=400, detail="Results not ready yet")
 
     responses = db.query(Response).filter(Response.attempt_id == attempt_id).all()
     obtained_marks = sum(r.marks_awarded for r in responses if r.marks_awarded)
 
-    # topic-wise (responses already in memory — no extra query)
     topic_wise: dict = {}
     for r in responses:
         q = db.query(Question).filter(Question.id == r.question_id).first()
