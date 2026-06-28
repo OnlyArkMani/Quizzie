@@ -39,6 +39,25 @@ class FaceDetector:
         # Thresholds
         self._MOUTH_OPEN_RATIO   = 0.35   # lip gap / mouth width > this → open
         self._GAZE_OFFSET_THRESH = 0.28   # iris offset ratio > this → looking away
+
+        # Head-pose thresholds (degrees). Tunable; defaults are conservative to
+        # limit false positives. Yaw = left/right turn, pitch = up/down tilt.
+        self._YAW_AWAY_DEG   = 22.0   # |yaw| beyond this → looking away (sideways)
+        self._PITCH_DOWN_DEG = 18.0   # pitch beyond this (head down) → looking_down
+        self._GAZE_YAW_GATE  = 18.0   # only trust eye-gaze when head is ~frontal
+
+        # 3D generic face model (cm) for solvePnP head-pose estimation.
+        # Landmark order: nose tip, chin, left eye corner, right eye corner,
+        # left mouth corner, right mouth corner.
+        self._POSE_LANDMARK_IDX = [1, 199, 33, 263, 61, 291]
+        self._POSE_MODEL_POINTS = np.array([
+            (0.0, 0.0, 0.0),
+            (0.0, -33.0, -6.5),
+            (-22.5, 17.0, -14.5),
+            (22.5, 17.0, -14.5),
+            (-14.5, -19.0, -11.5),
+            (14.5, -19.0, -11.5),
+        ], dtype=np.float64)
     
     def analyze_frame(self, image_bytes: bytes) -> Dict:
         """
@@ -58,6 +77,8 @@ class FaceDetector:
             detection_results = self.face_detection.process(image_rgb)
             mesh_results      = self.face_mesh.process(image_rgb)
 
+            img_h, img_w = image.shape[:2]
+
             flags          = []
             severity       = 'low'
             num_faces      = 0
@@ -65,6 +86,8 @@ class FaceDetector:
             looking_at_screen = True
             mouth_open     = False
             gaze_off_screen = False
+            looking_down   = False
+            head_pose      = {'pitch': 0.0, 'yaw': 0.0, 'roll': 0.0}
 
             # ── Face count ───────────────────────────────────────────────────
             if detection_results.detections:
@@ -92,31 +115,47 @@ class FaceDetector:
             if mesh_results.multi_face_landmarks:
                 lm = mesh_results.multi_face_landmarks[0].landmark
 
-                # Head pose — nose deviation
-                nose_tip    = lm[1]
-                left_eye_lm = lm[33]
-                right_eye_lm= lm[263]
-                eye_center_x = (left_eye_lm.x + right_eye_lm.x) / 2
-                deviation = abs(nose_tip.x - eye_center_x)
+                # Real 3D head pose (pitch/yaw) via solvePnP, replacing the old
+                # 1-D nose-x heuristic. Pitch lets us catch "looking down" at a
+                # phone/notes — the most common cheating posture, previously
+                # invisible. Falls back to the nose heuristic if solvePnP fails.
+                head_pose = self._head_pose(lm, img_w, img_h)
+                yaw   = head_pose['yaw']
+                pitch = head_pose['pitch']
 
-                if deviation > 0.15:
+                if abs(yaw) > self._YAW_AWAY_DEG:
                     looking_at_screen = False
+                    direction = 'left' if yaw < 0 else 'right'
                     flags.append({
                         'type': 'looking_away',
                         'severity': 'medium',
-                        'message': f'Head turned away (deviation {deviation:.2f})'
+                        'message': f'Head turned {direction} (yaw {yaw:.0f}°)'
                     })
                     if severity == 'low':
                         severity = 'medium'
 
-                # Eye gaze tracking via iris landmarks
-                gaze_flag = self._check_gaze(lm)
-                if gaze_flag:
-                    gaze_off_screen = True
+                if pitch < -self._PITCH_DOWN_DEG:
+                    looking_down = True
                     looking_at_screen = False
-                    flags.append(gaze_flag)
+                    flags.append({
+                        'type': 'looking_down',
+                        'severity': 'medium',
+                        'message': f'Head tilted down (pitch {pitch:.0f}°) — possible notes/phone'
+                    })
                     if severity == 'low':
                         severity = 'medium'
+
+                # Eye gaze — only trusted when the head is roughly frontal, so a
+                # turned head isn't double-counted as off-gaze (head rotation
+                # used to corrupt the 2-D iris offset).
+                if abs(yaw) <= self._GAZE_YAW_GATE:
+                    gaze_flag = self._check_gaze(lm)
+                    if gaze_flag:
+                        gaze_off_screen = True
+                        looking_at_screen = False
+                        flags.append(gaze_flag)
+                        if severity == 'low':
+                            severity = 'medium'
 
                 # Mouth movement / whispering detection
                 mouth_flag = self._check_mouth(lm)
@@ -140,12 +179,62 @@ class FaceDetector:
                 'face_confidence': face_confidence,
                 'mouth_open': mouth_open,
                 'gaze_off_screen': gaze_off_screen,
+                'looking_down': looking_down,
+                'head_pose': head_pose,
             }
 
         except Exception as e:
             return self._error_result('processing_error', str(e))
 
     # ── Private helpers ───────────────────────────────────────────────────────
+
+    def _head_pose(self, lm, img_w: int, img_h: int) -> dict:
+        """
+        Estimate head pitch/yaw/roll (degrees) via solvePnP on six landmarks.
+
+        pitch < 0 → looking down, pitch > 0 → looking up.
+        yaw   < 0 → turned left,  yaw   > 0 → turned right.
+        Returns zeros on any failure so callers degrade gracefully.
+        """
+        try:
+            image_points = np.array(
+                [[lm[idx].x * img_w, lm[idx].y * img_h] for idx in self._POSE_LANDMARK_IDX],
+                dtype=np.float64,
+            )
+            focal = float(img_w)
+            cam_matrix = np.array([
+                [focal, 0, img_w / 2.0],
+                [0, focal, img_h / 2.0],
+                [0, 0, 1],
+            ], dtype=np.float64)
+            dist = np.zeros((4, 1))
+
+            ok, rvec, tvec = cv2.solvePnP(
+                self._POSE_MODEL_POINTS, image_points, cam_matrix, dist,
+                flags=cv2.SOLVEPNP_ITERATIVE,
+            )
+            if not ok:
+                return {'pitch': 0.0, 'yaw': 0.0, 'roll': 0.0}
+
+            rmat, _ = cv2.Rodrigues(rvec)
+            pose_mat = cv2.hconcat((rmat, tvec))
+            _, _, _, _, _, _, euler = cv2.decomposeProjectionMatrix(pose_mat)
+
+            pitch = self._wrap_angle(float(euler[0][0]))
+            yaw   = self._wrap_angle(float(euler[1][0]))
+            roll  = self._wrap_angle(float(euler[2][0]))
+            return {'pitch': pitch, 'yaw': yaw, 'roll': roll}
+        except Exception:
+            return {'pitch': 0.0, 'yaw': 0.0, 'roll': 0.0}
+
+    @staticmethod
+    def _wrap_angle(a: float) -> float:
+        """Normalise a decomposeProjectionMatrix Euler angle into [-90, 90]."""
+        if a > 90:
+            a -= 180
+        elif a < -90:
+            a += 180
+        return a
 
     def _check_gaze(self, lm) -> dict | None:
         """

@@ -8,6 +8,9 @@ not once per request.
 """
 import base64
 import logging
+import threading
+import time
+from collections import deque
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 from typing import Optional
@@ -22,6 +25,35 @@ from app.api.deps import get_current_user, require_role
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# ── Per-attempt upload rate limiter ────────────────────────────────────────────
+# Frame/audio analysis is comparatively expensive (MediaPipe / a Celery task per
+# request). Without a cap a client could flood these endpoints. We allow a small
+# burst above the normal ~1 frame / detection_interval cadence and reject the
+# rest with HTTP 429. In-process sliding window, keyed by attempt id.
+_RATE_MAX_EVENTS = 8          # max uploads ...
+_RATE_WINDOW_SEC = 5.0        # ... per this many seconds, per attempt
+_rate_state: dict = {}
+_rate_lock = threading.Lock()
+
+
+def _check_rate_limit(attempt_id: str) -> bool:
+    """Return True if the request is within the allowed rate, else False."""
+    now = time.time()
+    with _rate_lock:
+        dq = _rate_state.get(attempt_id)
+        if dq is None:
+            dq = deque()
+            _rate_state[attempt_id] = dq
+        while dq and now - dq[0] > _RATE_WINDOW_SEC:
+            dq.popleft()
+        if len(dq) >= _RATE_MAX_EVENTS:
+            return False
+        dq.append(now)
+        if len(_rate_state) > 5000:        # crude unbounded-growth guard
+            for k in [k for k, v in _rate_state.items() if not v or now - v[-1] > 60]:
+                _rate_state.pop(k, None)
+        return True
 
 # ── Sync-fallback singletons ───────────────────────────────────────────────────
 # Loaded lazily on first use, then reused for the lifetime of the process.
@@ -62,37 +94,31 @@ def _get_celery_tasks():
     return analyze_frame_task, analyze_audio_task
 
 
-def _persist_flags_sync(attempt_id: str, flags: list, db: Session):
-    """Write flags to DB using the already-open request DB session."""
-    from app.models.cheat_log import CheatSeverity
-    from app.models.attempt import ExamAttempt
+def _persist_flags_sync(attempt_id: str, flags: list, db: Session, event_type: str = "frame_analysis"):
+    """
+    Persist flags AND apply the health penalty using the request DB session.
+
+    Delegates to the shared ``app.ai_monitor.health.record_violations`` writer
+    so the sync path stays identical to the Celery worker path. Returns the
+    record summary (health status + auto_submitted) or None if no attempt.
+    """
+    from app.ai_monitor import health, smoothing
+    from app.models.proctoring_settings import ProctoringSettings
+
+    # Temporal smoothing: drop transient single-frame flags before they cost HP.
+    flags = smoothing.confirmed_flags(attempt_id, flags)
+    if not flags:
+        return None
 
     attempt = db.query(ExamAttempt).filter(ExamAttempt.id == attempt_id).first()
     if not attempt:
-        return
+        return None
 
-    for flag in flags:
-        if isinstance(flag, dict):
-            flag_type = flag.get("type", "unknown")
-            raw_sev = flag.get("severity", "low")
-        else:
-            flag_type = str(flag)
-            raw_sev = "low"
+    ps = db.query(ProctoringSettings).filter(
+        ProctoringSettings.exam_id == attempt.exam_id
+    ).first()
 
-        try:
-            severity = CheatSeverity(raw_sev)
-        except ValueError:
-            severity = CheatSeverity.LOW
-
-        db.add(CheatLog(
-            attempt_id=attempt.id,
-            flag_type=flag_type,
-            severity=severity,
-            meta_data={"message": flag.get("message", "") if isinstance(flag, dict) else ""},
-        ))
-
-    attempt.cheating_flags = (attempt.cheating_flags or 0) + len(flags)
-    db.commit()
+    return health.record_violations(db, attempt, flags, ps=ps, event_type=event_type)
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -110,8 +136,11 @@ async def analyze_frame(
     if str(attempt.student_id) != str(current_user.id):
         raise HTTPException(status_code=403, detail="Not authorized")
 
-    image_bytes = await file.read()
     attempt_id_str = str(attempt_id)
+    if not _check_rate_limit(attempt_id_str):
+        raise HTTPException(status_code=429, detail="Too many frames; slow down")
+
+    image_bytes = await file.read()
 
     # ── Fast path: Celery available ────────────────────────────────────────────
     if _celery_available():
@@ -128,10 +157,18 @@ async def analyze_frame(
 
     # ── Slow path: sync fallback (local dev without Redis) ─────────────────────
     try:
+        from app.ai_monitor import snapshot
+
         result = _get_face_detector_sync().analyze_frame(image_bytes)
+        record = None
         if result.get("flags"):
-            _persist_flags_sync(attempt_id_str, result["flags"], db)
-        return {"queued": False, "sync": True, "result": result}
+            snapshot.attach_snapshots(image_bytes, result["flags"])
+            record = _persist_flags_sync(attempt_id_str, result["flags"], db)
+        response = {"queued": False, "sync": True, "result": result}
+        if record:
+            response["health"] = record["health"]
+            response["auto_submitted"] = record["auto_submitted"]
+        return response
     except Exception as e:
         logger.exception("Sync frame analysis failed for attempt %s", attempt_id_str)
         raise HTTPException(status_code=500, detail=f"Frame analysis failed: {e}")
@@ -150,8 +187,11 @@ async def analyze_audio(
     if str(attempt.student_id) != str(current_user.id):
         raise HTTPException(status_code=403, detail="Not authorized")
 
-    audio_bytes = await file.read()
     attempt_id_str = str(attempt_id)
+    if not _check_rate_limit("audio:" + attempt_id_str):
+        raise HTTPException(status_code=429, detail="Too many audio chunks; slow down")
+
+    audio_bytes = await file.read()
 
     if _celery_available():
         try:
@@ -167,13 +207,18 @@ async def analyze_audio(
 
     try:
         result = _get_audio_analyzer_sync().analyze_audio(audio_bytes)
+        record = None
         if result.get("flags"):
             flags_as_dicts = [
                 {"type": f, "severity": result.get("severity", "medium"), "message": f}
                 for f in result["flags"]
             ]
-            _persist_flags_sync(attempt_id_str, flags_as_dicts, db)
-        return {"queued": False, "sync": True, "result": result}
+            record = _persist_flags_sync(attempt_id_str, flags_as_dicts, db, event_type="audio_detection")
+        response = {"queued": False, "sync": True, "result": result}
+        if record:
+            response["health"] = record["health"]
+            response["auto_submitted"] = record["auto_submitted"]
+        return response
     except Exception as e:
         logger.exception("Sync audio analysis failed for attempt %s", attempt_id_str)
         raise HTTPException(status_code=500, detail=f"Audio analysis failed: {e}")

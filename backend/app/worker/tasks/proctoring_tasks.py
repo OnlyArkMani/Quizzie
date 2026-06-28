@@ -55,10 +55,13 @@ def analyze_frame_task(self, attempt_id: str, image_bytes_b64: str) -> dict:
     import base64
 
     try:
+        from app.ai_monitor import snapshot
+
         image_bytes = base64.b64decode(image_bytes_b64)
         result = _get_face_detector().analyze_frame(image_bytes)
 
         if result.get("flags"):
+            snapshot.attach_snapshots(image_bytes, result["flags"])
             _persist_flags(attempt_id, result["flags"])
 
         return result
@@ -102,35 +105,32 @@ def analyze_audio_task(self, attempt_id: str, audio_bytes_b64: str) -> dict:
 # ── Helper ─────────────────────────────────────────────────────────────────────
 
 def _persist_flags(attempt_id: str, flags: list):
-    """Write cheat flags to DB and increment attempt.cheating_flags counter."""
+    """
+    Persist cheat flags AND apply the health penalty in the worker process.
+
+    Delegates to the shared ``app.ai_monitor.health.record_violations`` writer
+    so the async (Celery) path decrements health exactly like the sync path —
+    previously face/gaze/mouth flags never affected health when the worker ran.
+    """
+    from app.ai_monitor import health, smoothing
+    from app.models.proctoring_settings import ProctoringSettings
+
+    # Temporal smoothing: drop transient single-frame flags before they cost HP.
+    flags = smoothing.confirmed_flags(attempt_id, flags)
+    if not flags:
+        return
+
     db = SessionLocal()
     try:
         attempt = db.query(ExamAttempt).filter(ExamAttempt.id == attempt_id).first()
         if not attempt:
             return
 
-        for flag in flags:
-            if isinstance(flag, dict):
-                flag_type = flag.get("type", "unknown")
-                raw_severity = flag.get("severity", "low")
-            else:
-                flag_type = str(flag)
-                raw_severity = "low"
+        ps = db.query(ProctoringSettings).filter(
+            ProctoringSettings.exam_id == attempt.exam_id
+        ).first()
 
-            try:
-                severity = CheatSeverity(raw_severity)
-            except ValueError:
-                severity = CheatSeverity.LOW
-
-            db.add(CheatLog(
-                attempt_id=attempt.id,
-                flag_type=flag_type,
-                severity=severity,
-                meta_data={"message": flag.get("message", "") if isinstance(flag, dict) else ""},
-            ))
-
-        attempt.cheating_flags = (attempt.cheating_flags or 0) + len(flags)
-        db.commit()
+        health.record_violations(db, attempt, flags, ps=ps, event_type="frame_analysis")
     except Exception:
         db.rollback()
         logger.exception("_persist_flags failed for attempt %s", attempt_id)
