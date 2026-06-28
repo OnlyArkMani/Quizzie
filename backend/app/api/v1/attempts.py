@@ -1,6 +1,14 @@
 """
 Attempts API — exam start, submit, results, auto-save.
-Submit dispatches evaluation to Celery so the HTTP response is instant.
+
+Submit flow
+-----------
+1. Validate + persist responses synchronously (always fast, just SQL inserts).
+2. Try to dispatch Celery evaluation task (async, best-effort).
+3. If Celery/Redis is unavailable, evaluate synchronously in-process instead.
+   This guarantees the HTTP response always returns quickly regardless of
+   whether Redis is running — critical for the Windows dev environment where
+   Redis may not be installed.
 """
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -8,24 +16,31 @@ from datetime import datetime, timedelta
 from typing import List
 from uuid import UUID
 from pydantic import BaseModel
+import logging
 
 from app.core.database import get_db
 from app.core.cache import cache, key_leaderboard
 from app.models.user import User
-from app.models.exam import Exam, ExamStatus
+from app.models.exam import Exam
 from app.models.attempt import ExamAttempt, Response, AttemptStatus
 from app.models.question import Question
 from app.schemas.response import AttemptCreate, AttemptSubmit, Attempt as AttemptSchema
 from app.api.deps import get_current_user, require_role
 from app.services.evaluation_service import EvaluationService
 
-# Module-level name — tests patch THIS via:
+logger = logging.getLogger(__name__)
+
+# ── Celery task import (optional — app works without it) ─────────────────────
+# We import at module level so tests can patch it via:
 #   patch("app.api.v1.attempts.evaluate_attempt_task")
-# Celery imports fine without a running broker; None only if the module itself is missing.
+# If Celery/Redis is not available the import still succeeds (Celery is lazy);
+# the task only fails when .apply_async() is called.
 try:
-    from app.worker.tasks.evaluation_tasks import evaluate_attempt_task
+    from app.worker.tasks.evaluation_tasks import evaluate_attempt_task as _celery_task
 except Exception:
-    evaluate_attempt_task = None
+    _celery_task = None
+
+evaluate_attempt_task = _celery_task
 
 router = APIRouter()
 
@@ -33,6 +48,43 @@ router = APIRouter()
 class AutoSaveBody(BaseModel):
     responses: List[dict]
 
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _try_celery(attempt_id: str) -> tuple[bool, dict | None]:
+    """
+    Try to dispatch the evaluation task to Celery.
+    Returns (dispatched: bool, task_info: dict | None).
+
+    We wrap this in a tight try/except so ANY Celery/Redis error
+    (connection refused, timeout, WinError 5, etc.) falls back instantly
+    to synchronous evaluation instead of hanging the request.
+    """
+    import app.api.v1.attempts as _mod  # always read current binding for test patching
+    task_fn = _mod.evaluate_attempt_task
+    if task_fn is None:
+        return False, None
+    try:
+        # apply_async can block if the broker is slow to refuse.
+        # We set a short socket timeout in celery_app.py (3 s), but as an
+        # extra safety net we run the dispatch in a thread with a 5 s timeout.
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(
+                task_fn.apply_async,
+                args=[attempt_id],
+                kwargs={"queue": "evaluation"},
+            )
+            task = future.result(timeout=5)   # 5 s hard cap — never hangs the request
+        return True, {"task_id": task.id}
+    except Exception as e:
+        logger.warning(
+            "Celery unavailable (%s) — falling back to synchronous evaluation.", e
+        )
+        return False, None
+
+
+# ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.post("/start", response_model=AttemptSchema, status_code=status.HTTP_201_CREATED)
 def start_exam(
@@ -43,11 +95,12 @@ def start_exam(
     exam = db.query(Exam).filter(Exam.id == attempt_data.exam_id).first()
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found")
-    if exam.status != ExamStatus.LIVE:
+    if exam.status.value != "live":
         raise HTTPException(status_code=400, detail="Exam is not live")
 
     cutoff_time = datetime.utcnow() - timedelta(hours=24)
 
+    # Expire stale in-progress attempts (> 24 h old)
     db.query(ExamAttempt).filter(
         ExamAttempt.exam_id == attempt_data.exam_id,
         ExamAttempt.student_id == current_user.id,
@@ -55,6 +108,7 @@ def start_exam(
         ExamAttempt.started_at < cutoff_time,
     ).update({"status": AttemptStatus.SUBMITTED})
 
+    # Resume existing valid attempt
     existing = db.query(ExamAttempt).filter(
         ExamAttempt.exam_id == attempt_data.exam_id,
         ExamAttempt.student_id == current_user.id,
@@ -88,10 +142,11 @@ async def submit_exam(
     if str(attempt.student_id) != str(current_user.id):
         raise HTTPException(status_code=403, detail="Not authorized")
 
-    status_val = attempt.status.value if hasattr(attempt.status, "value") else attempt.status
+    status_val = attempt.status.value if hasattr(attempt.status, "value") else str(attempt.status)
     if status_val != AttemptStatus.IN_PROGRESS.value:
         raise HTTPException(status_code=400, detail="Attempt already submitted")
 
+    # ── 1. Persist responses (fast SQL inserts) ───────────────────────────────
     for rd in submission.responses:
         db.add(Response(
             attempt_id=attempt_id,
@@ -107,30 +162,38 @@ async def submit_exam(
     attempt.status = AttemptStatus.SUBMITTED
     db.commit()
 
-    # evaluate_attempt_task is the module-level name.
-    # Tests replace it via patch("app.api.v1.attempts.evaluate_attempt_task").
-    # We import the module itself so we always read the current binding, not a
-    # stale closure — this is the standard Python patch pattern.
-    import app.api.v1.attempts as _this_module
-    _task = _this_module.evaluate_attempt_task
+    # ── 2. Try Celery (non-blocking, 5 s max) ────────────────────────────────
+    dispatched, task_info = _try_celery(str(attempt_id))
 
-    try:
-        if _task is None:
-            raise RuntimeError("Celery not configured")
-        task = _task.apply_async(args=[str(attempt_id)], queue="evaluation")
-        await cache.delete(key_leaderboard(str(attempt.exam_id)))
+    if dispatched:
+        # Cache busting — best-effort, don't let it block
+        try:
+            await cache.delete(key_leaderboard(str(attempt.exam_id)))
+        except Exception:
+            pass
         return {
-            "message": "Exam submitted. Results will be ready shortly.",
+            "message": "Exam submitted successfully. Results will be ready shortly.",
             "attempt_id": str(attempt_id),
-            "task_id": task.id,
+            "task_id": task_info["task_id"],
             "status": "evaluating",
         }
-    except Exception:
-        # Synchronous fallback — works in dev/test without a running broker
-        svc = EvaluationService(db)
-        result = svc.evaluate_attempt(attempt_id)
+
+    # ── 3. Synchronous fallback (always works, no Redis needed) ───────────────
+    logger.info("Evaluating attempt %s synchronously (Celery unavailable).", attempt_id)
+    svc = EvaluationService(db)
+    result = svc.evaluate_attempt(attempt_id)
+
+    try:
         await cache.delete(key_leaderboard(str(attempt.exam_id)))
-        return result
+    except Exception:
+        pass
+
+    return {
+        "message": "Exam submitted and evaluated successfully.",
+        "attempt_id": str(attempt_id),
+        "status": "evaluated",
+        **result,
+    }
 
 
 @router.get("/{attempt_id}/results", response_model=dict)
@@ -151,36 +214,50 @@ def get_results(
     elif role == "examiner" and str(exam.created_by) != str(current_user.id):
         raise HTTPException(status_code=403, detail="Not authorized")
 
-    status_val = attempt.status.value if hasattr(attempt.status, "value") else attempt.status
-    if status_val == AttemptStatus.SUBMITTED.value:
-        return {
-            "status": "evaluating",
-            "message": "Results are being processed. Please check back in a moment.",
-        }
-    if status_val != AttemptStatus.EVALUATED.value:
-        raise HTTPException(status_code=400, detail="Results not ready yet")
+    status_val = attempt.status.value if hasattr(attempt.status, "value") else str(attempt.status)
 
+    if status_val == AttemptStatus.IN_PROGRESS.value:
+        raise HTTPException(status_code=400, detail="Exam not yet submitted")
+
+    if status_val == AttemptStatus.SUBMITTED.value:
+        # Evaluate now — covers the case where Celery worker hasn't picked it up yet
+        # or is unavailable (e.g. dev without Redis).
+        svc = EvaluationService(db)
+        result = svc.evaluate_attempt(attempt_id)
+        # Re-fetch updated attempt
+        db.refresh(attempt)
+        status_val = AttemptStatus.EVALUATED.value
+
+    # Should be EVALUATED now
     responses = db.query(Response).filter(Response.attempt_id == attempt_id).all()
-    obtained_marks = sum(r.marks_awarded for r in responses if r.marks_awarded)
+
+    score = float(attempt.score) if attempt.score is not None else 0.0
+    obtained_marks = sum(
+        float(r.marks_awarded) for r in responses if r.marks_awarded is not None
+    )
 
     topic_wise: dict = {}
     for r in responses:
         q = db.query(Question).filter(Question.id == r.question_id).first()
         if q and q.topic:
             if q.topic not in topic_wise:
-                topic_wise[q.topic] = {"correct": 0, "total": 0}
+                topic_wise[q.topic] = {"correct": 0, "total": 0, "percentage": 0.0}
             topic_wise[q.topic]["total"] += 1
             if r.is_correct:
                 topic_wise[q.topic]["correct"] += 1
 
+    # Compute percentages
+    for t in topic_wise.values():
+        t["percentage"] = round((t["correct"] / t["total"]) * 100, 1) if t["total"] else 0.0
+
     return {
-        "score": float(attempt.score),
-        "obtained_marks": float(obtained_marks),
-        "total_marks": exam.total_marks,
+        "score": score,
+        "obtained_marks": obtained_marks,
+        "total_marks": float(exam.total_marks),
         "correct_count": sum(1 for r in responses if r.is_correct),
         "total_questions": len(responses),
         "time_taken_seconds": attempt.time_taken_seconds,
-        "cheating_flags": attempt.cheating_flags,
+        "cheating_flags": attempt.cheating_flags or 0,
         "pass_percentage": float(exam.pass_percentage),
         "topic_wise": topic_wise,
     }

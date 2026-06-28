@@ -1,3 +1,4 @@
+import React from 'react';
 import { motion } from 'framer-motion';
 import { Loader2 } from 'lucide-react';
 
@@ -32,13 +33,21 @@ const Button: React.FC<ButtonProps> = ({
     lg: 'px-6 py-3 text-lg',
   };
 
+  // FIX: Spreading React.ButtonHTMLAttributes directly onto motion.button causes a type
+  // conflict between React's AnimationEventHandler<HTMLButtonElement> (for onAnimationStart)
+  // and framer-motion's own AnimationDefinition-based onAnimationStart prop.
+  // Solution: cast the native HTML props to `object` before spreading so TypeScript accepts
+  // the merge. framer-motion's own motion props (whileHover, whileTap) are typed separately
+  // and remain fully type-safe. Runtime behaviour is identical.
+  const nativeProps = props as object;
+
   return (
     <motion.button
       whileHover={{ scale: disabled || isLoading ? 1 : 1.02 }}
       whileTap={{ scale: disabled || isLoading ? 1 : 0.98 }}
       className={`${baseStyles} ${variants[variant]} ${sizes[size]} ${className}`}
       disabled={disabled || isLoading}
-      {...props as any}
+      {...nativeProps}
     >
       {isLoading && <Loader2 className="w-4 h-4 animate-spin" />}
       {children}

@@ -33,6 +33,7 @@ interface DetectionResult {
   face_confidence: number;
   mouth_open: boolean;
   gaze_off_screen: boolean;
+  looking_down?: boolean;
   flags: Array<{
     type: string;
     severity: string;
@@ -40,8 +41,11 @@ interface DetectionResult {
   }>;
 }
 
-// Strike system: tracks per-violation-type consecutive hits
-// First hit = warning only (no health loss), second+ = full penalty
+// Camera/mic flags are now logged and scored server-side (with temporal
+// smoothing) by /monitor/frame and /monitor/audio, so the client only shows
+// UX warnings for them and never re-reports them (that used to double-log every
+// violation). Only client-detected events (tab switch / blur) are reported via
+// /monitor/enhanced/violation, keeping a one-warning grace before penalising.
 const GRACE_PERIOD_MS = 15_000;  // 15 s no monitoring after exam starts
 const RECOVERY_INTERVAL_MS = 60_000; // recover health every 60 s of clean behaviour
 
@@ -147,7 +151,9 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
     return () => { if (detectionIntervalRef.current) { clearInterval(detectionIntervalRef.current); detectionIntervalRef.current = null; } };
   }, [cameraReady, isActive, settings.face_detection_enabled, settings.detection_interval]);
 
-  // ── Strike system ──────────────────────────────────────────────
+  // ── Strike system (client-detected events only, e.g. tab switch) ──
+  // Keeps a one-warning grace before the violation is reported to the server,
+  // which then logs it and applies the health penalty.
   const handleStrike = useCallback((violation: { type: string; severity: string; message: string }) => {
     if (gracePeriodActiveRef.current) return;
 
@@ -156,23 +162,28 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
     strikes[violation.type] = prev + 1;
 
     if (prev === 0) {
-      // First offence: show warning, reset clean streak, do NOT penalise health
+      // First offence: warn only, no server report / penalty
       cleanStreakRef.current = 0;
       showWarning(violation);
     } else {
-      // Second+ offence: full penalty
+      // Second+ offence: report to server (which penalises health)
       cleanStreakRef.current = 0;
       showWarning(violation, true);
       reportViolation(violation);
     }
   }, []);
 
-  const showWarning = (violation: { type: string; message: string }, isPenalty = false) => {
+  // UI-only notice for camera/mic detections. The server already logged and
+  // scored these — we never POST them from here (avoids double-logging).
+  const notifyDetection = useCallback((violation: { message: string }) => {
+    if (gracePeriodActiveRef.current) return;
+    showWarning(violation);
+  }, []);
+
+  const showWarning = (violation: { type?: string; message: string }, isPenalty = false) => {
     if (warningTimerRef.current) clearTimeout(warningTimerRef.current);
     setWarningOverlay({
-      message: isPenalty
-        ? `⚠️ Penalty applied: ${violation.message}`
-        : `⚠️ Warning: ${violation.message} — next time will be penalised`,
+      message: `⚠️ ${violation.message}`,
       type: isPenalty ? 'penalty' : 'warning',
     });
     warningTimerRef.current = window.setTimeout(() => setWarningOverlay(null), 4000);
@@ -213,12 +224,12 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
               const result = data.sync ? data.result : data;
               
               if (result?.flags?.length > 0) {
-                result.flags.forEach((flag: any) => {
-                  const v = typeof flag === 'string'
-                    ? { type: flag, severity: 'medium', message: flag.replace(/_/g, ' ') }
-                    : flag;
-                  handleStrike(v);
-                });
+                // Server already logged + scored these; just surface a notice.
+                const flag = result.flags[0];
+                const v = typeof flag === 'string'
+                  ? { message: flag.replace(/_/g, ' ') }
+                  : { message: flag.message || String(flag.type).replace(/_/g, ' ') };
+                notifyDetection(v);
               }
             } catch { /* silent */ } finally { setAudioDetecting(false); }
           }
@@ -273,28 +284,27 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
           setFrameCount(prev => prev + 1);
 
           if (result.flags?.length > 0) {
-            // Don't monitor during grace period
+            // Server logs + scores these; surface the most severe as a notice.
             if (!gracePeriodActiveRef.current) {
-              result.flags.forEach(flag => handleStrike(flag));
+              const top = result.flags.find(f => f.severity === 'high') || result.flags[0];
+              notifyDetection({ message: top.message || top.type.replace(/_/g, ' ') });
             }
             cleanStreakRef.current = 0;
           } else {
-            // No flags this frame — increment clean streak, also reset strikes on prolonged clean run
+            // No flags this frame — count toward the clean streak that triggers
+            // periodic health recovery.
             cleanStreakRef.current += 1;
-            if (cleanStreakRef.current >= 5) {
-              strikesRef.current = {};
-            }
           }
         } catch { /* silent */ } finally { setIsDetecting(false); }
       }, 'image/jpeg', 0.8);
     } catch { setIsDetecting(false); }
-  }, [attemptId, isDetecting, handleStrike]);
+  }, [attemptId, isDetecting, notifyDetection]);
 
   const reportViolation = async (violation: { type: string; severity: string; message: string }) => {
     try {
       await api.post('/monitor/enhanced/violation', {
         attempt_id: attemptId,
-        event_type: 'proctoring_flag',
+        event_type: violation.type === 'tab_switch' ? 'tab_switch' : 'proctoring_flag',
         flags: [{ ...violation, metadata: { timestamp: new Date().toISOString() } }],
         timestamp: new Date().toISOString()
       });
@@ -317,6 +327,7 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
     if (!lastDetection) return 'Waiting for first detection...';
     if (!lastDetection.face_present) return '⚠️ No face detected';
     if (lastDetection.multiple_faces) return '⚠️ Multiple faces detected';
+    if (lastDetection.looking_down) return '⚠️ Looking down — possible notes/phone';
     if (lastDetection.gaze_off_screen) return '⚠️ Eyes looking off screen';
     if (lastDetection.mouth_open) return '⚠️ Mouth movement detected';
     if (!lastDetection.looking_at_screen) return '⚠️ Looking away from screen';

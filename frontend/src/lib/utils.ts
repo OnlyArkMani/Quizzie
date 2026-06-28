@@ -51,14 +51,18 @@ export function getScoreColor(score: number, passPercentage: number = 40): strin
   return 'text-rose-600';
 }
 
-export function debounce<T extends (...args: any[]) => any>(
+// FIX: Use `ReturnType<typeof window.setTimeout>` (= number in browsers) instead of
+// `NodeJS.Timeout`. When @types/node is in scope alongside DOM types, the bare
+// `ReturnType<typeof setTimeout>` resolves to NodeJS.Timeout and breaks the build.
+// Using `window.setTimeout` explicitly anchors it to the DOM overload → number.
+export function debounce<T extends (...args: Parameters<T>) => ReturnType<T>>(
   func: T,
   wait: number
 ): (...args: Parameters<T>) => void {
-  let timeout: NodeJS.Timeout;
+  let timeout: ReturnType<typeof window.setTimeout>;
   return (...args: Parameters<T>) => {
     clearTimeout(timeout);
-    timeout = setTimeout(() => func(...args), wait);
+    timeout = window.setTimeout(() => func(...args), wait);
   };
 }
 
