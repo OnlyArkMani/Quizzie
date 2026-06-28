@@ -1,5 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import api from '@/lib/api';
+import { useAuthStore } from '@/features/auth/store/authStore';
 import {
   Heart,
   AlertTriangle,
@@ -56,11 +58,16 @@ const HealthBar: React.FC<HealthBarProps> = ({
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = window.location.hostname;
 
-    // FIX Bug 7: Correct WS path
-    const wsUrl = `${protocol}//${host}:8000/api/v1/monitor/enhanced/ws/proctoring/${attemptId}`;
+    // The WS endpoint now requires auth; browsers can't set WS headers, so the
+    // JWT is passed as a query param and validated server-side.
+    const token = useAuthStore.getState().token;
+    const wsUrl = `${protocol}//${host}:8000/api/v1/monitor/enhanced/ws/proctoring/${attemptId}?token=${encodeURIComponent(token || '')}`;
 
     let websocket: WebSocket;
-    let reconnectTimeout: NodeJS.Timeout;
+    // FIX: Use number instead of NodeJS.Timeout — browser setTimeout/setInterval return number.
+    // NodeJS.Timeout only exists in Node.js runtime; using it in DOM-targeted code causes
+    // TS2503 "Cannot find namespace 'NodeJS'" when @types/node and DOM types coexist.
+    let reconnectTimeout: number;
 
     const connect = () => {
       websocket = new WebSocket(wsUrl);
@@ -80,7 +87,7 @@ const HealthBar: React.FC<HealthBarProps> = ({
 
             if (newHealth.percentage <= 40 && newHealth.percentage > 0) {
               setShowAlert(true);
-              setTimeout(() => setShowAlert(false), 3000);
+              window.setTimeout(() => setShowAlert(false), 3000);
             }
 
             if (newHealth.percentage <= 0 && onHealthZero) {
@@ -104,7 +111,7 @@ const HealthBar: React.FC<HealthBarProps> = ({
       websocket.onclose = () => {
         setIsConnected(false);
         // Auto-reconnect after 5 seconds
-        reconnectTimeout = setTimeout(connect, 5000);
+        reconnectTimeout = window.setTimeout(connect, 5000);
       };
     };
 
@@ -120,6 +127,26 @@ const HealthBar: React.FC<HealthBarProps> = ({
         }
       }
     };
+  }, [attemptId, onHealthZero]);
+
+  // HTTP polling fallback. Camera/audio analysis runs in the Celery worker,
+  // which can't push to the in-process WebSocket, so poll the persisted health
+  // so worker-applied changes still show up. (The WS gives instant updates for
+  // client-reported events; this catches everything else.)
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await api.get(`/monitor/enhanced/attempt/${attemptId}/health`);
+        if (cancelled || !res?.data) return;
+        const h = res.data as HealthStatus;
+        setHealth(h);
+        if (h.percentage <= 0 && onHealthZero) onHealthZero();
+      } catch { /* silent — best effort */ }
+    };
+    const id = window.setInterval(poll, 6000);
+    poll();
+    return () => { cancelled = true; clearInterval(id); };
   }, [attemptId, onHealthZero]);
 
   const getHealthColor = useCallback(() => {
@@ -246,33 +273,33 @@ const HealthBar: React.FC<HealthBarProps> = ({
             {/* Recent Violations */}
             {showViolations && recentViolations.length > 0 && (
               <div className="mt-3 bg-white rounded-xl shadow-lg border border-slate-200 p-3">
-          <h3 className="text-sm font-semibold text-slate-900 mb-2">Recent Flags</h3>
-          <div className="space-y-2">
-            <AnimatePresence>
-              {recentViolations.slice(0, 3).map((violation, index) => (
-                <motion.div
-                  key={`${violation.type}-${violation.timestamp}-${index}`}
-                  initial={{ opacity: 0, x: -10 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  exit={{ opacity: 0, x: 10 }}
-                  className={`flex items-start gap-2 p-2 rounded-lg text-xs ${
-                    violation.severity === 'high' ? 'bg-rose-50 border border-rose-200' :
-                    violation.severity === 'medium' ? 'bg-amber-50 border border-amber-200' :
-                    'bg-blue-50 border border-blue-200'
-                  }`}
-                >
-                  <div className={`mt-0.5 ${
-                    violation.severity === 'high' ? 'text-rose-600' :
-                    violation.severity === 'medium' ? 'text-amber-600' :
-                    'text-blue-600'
-                  }`}>
-                    {getViolationIcon(violation.type)}
-                  </div>
-                  <div className="flex-1">
-                    <p className="font-medium text-slate-900">{violation.message}</p>
-                    <p className="text-slate-500 text-xs mt-0.5">
-                      {new Date(violation.timestamp).toLocaleTimeString()}
-                    </p>
+                <h3 className="text-sm font-semibold text-slate-900 mb-2">Recent Flags</h3>
+                <div className="space-y-2">
+                  <AnimatePresence>
+                    {recentViolations.slice(0, 3).map((violation, index) => (
+                      <motion.div
+                        key={`${violation.type}-${violation.timestamp}-${index}`}
+                        initial={{ opacity: 0, x: -10 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        exit={{ opacity: 0, x: 10 }}
+                        className={`flex items-start gap-2 p-2 rounded-lg text-xs ${
+                          violation.severity === 'high' ? 'bg-rose-50 border border-rose-200' :
+                          violation.severity === 'medium' ? 'bg-amber-50 border border-amber-200' :
+                          'bg-blue-50 border border-blue-200'
+                        }`}
+                      >
+                        <div className={`mt-0.5 ${
+                          violation.severity === 'high' ? 'text-rose-600' :
+                          violation.severity === 'medium' ? 'text-amber-600' :
+                          'text-blue-600'
+                        }`}>
+                          {getViolationIcon(violation.type)}
+                        </div>
+                        <div className="flex-1">
+                          <p className="font-medium text-slate-900">{violation.message}</p>
+                          <p className="text-slate-500 text-xs mt-0.5">
+                            {new Date(violation.timestamp).toLocaleTimeString()}
+                          </p>
                         </div>
                       </motion.div>
                     ))}

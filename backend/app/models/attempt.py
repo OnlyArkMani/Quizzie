@@ -23,7 +23,12 @@ class ExamAttempt(Base):
     score = Column(Numeric(5, 2), nullable=True)
     status = Column(Enum(AttemptStatus), nullable=False, default=AttemptStatus.IN_PROGRESS)
     cheating_flags = Column(Integer, default=0)
-    
+    # Persisted proctoring health. NULL = not yet initialised (lazy init from
+    # the exam's ProctoringSettings.initial_health on first violation/read).
+    # Storing it avoids replaying the whole cheat_log history on every request
+    # and lets health recovery actually persist.
+    current_health = Column(Integer, nullable=True)
+
     # Relationships
     exam = relationship("Exam", back_populates="attempts")
     responses = relationship("Response", back_populates="attempt", cascade="all, delete-orphan")
