@@ -277,6 +277,14 @@ const ExamAnalytics = () => {
                     {Math.floor(entry.time_taken_seconds / 60)}m {entry.time_taken_seconds % 60}s
                   </span>
                   <span className="font-bold text-indigo-600">{entry.score.toFixed(1)}%</span>
+                  {entry.attempt_id && (
+                    <button
+                      onClick={() => navigate(`/examiner/attempt/${entry.attempt_id}/grade`)}
+                      className="text-sm font-medium text-indigo-600 hover:text-indigo-700"
+                    >
+                      Grade
+                    </button>
+                  )}
                 </div>
               </div>
             ))}

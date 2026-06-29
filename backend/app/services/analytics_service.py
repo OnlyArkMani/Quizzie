@@ -98,6 +98,7 @@ class AnalyticsService:
             
             leaderboard.append({
                 'rank': rank,
+                'attempt_id': str(attempt.id),
                 'student_id': str(attempt.student_id),
                 'student_name': student.full_name if student else "Unknown",
                 'score': float(attempt.score),

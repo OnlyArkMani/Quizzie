@@ -9,13 +9,16 @@ interface ExamDraft {
   pass_percentage: number;
   questions: Array<{
     question_text: string;
-    question_type: 'single' | 'multiple';
+    question_type: 'single' | 'multiple' | 'coding' | 'subjective';
     marks: number;
     topic?: string;
     options: Array<{
       option_text: string;
       is_correct: boolean;
     }>;
+    // Coding/subjective only
+    reference_answer?: string;
+    language?: string;
   }>;
 }
 
