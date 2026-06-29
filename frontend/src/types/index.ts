@@ -64,11 +64,14 @@ export interface Question {
   id: string;
   exam_id: string;
   question_text: string;
-  question_type: 'single' | 'multiple';
+  question_type: 'single' | 'multiple' | 'coding' | 'subjective';
   marks: number;
   topic?: string;
   display_order: number;
   options: Option[];
+  // Coding/subjective only
+  reference_answer?: string;
+  language?: string;
 }
 
 export interface Option {
@@ -82,6 +85,7 @@ export interface Option {
 export interface Answer {
   questionId: string;
   selectedOptions: number[];
+  textAnswer?: string;        // coding/subjective free-text answer
   markedForReview: boolean;
   visited: boolean;
 }

@@ -19,6 +19,7 @@ const ExaminerDashboard = lazy(() => import('./features/examiner/pages/Dashboard
 const CreateExam = lazy(() => import('./features/examiner/pages/CreateExam'));
 const ManageExams = lazy(() => import('./features/examiner/pages/ManageExams'));
 const ExamAnalytics = lazy(() => import('./features/examiner/pages/ExamAnalytics'));
+const GradeAttempt = lazy(() => import('./features/examiner/pages/GradeAttempt'));
 
 const NotFound = lazy(() => import('./shared/pages/NotFound'));
 const Unauthorized = lazy(() => import('./shared/pages/Unauthorized'));
@@ -129,6 +130,15 @@ function App() {
             element={
               <ProtectedRoute allowedRoles={['examiner', 'admin']}>
                 <ExamAnalytics />
+              </ProtectedRoute>
+            }
+          />
+
+          <Route
+            path="/examiner/attempt/:attemptId/grade"
+            element={
+              <ProtectedRoute allowedRoles={['examiner', 'admin']}>
+                <GradeAttempt />
               </ProtectedRoute>
             }
           />

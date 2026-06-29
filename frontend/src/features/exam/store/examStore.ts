@@ -13,6 +13,7 @@ interface ExamState {
   // Actions
   initExam: (examId: string, questions: Question[], durationSeconds: number, attemptId: string) => void;
   selectAnswer: (questionId: string, optionIndex: number, isMultiple: boolean) => void;
+  setTextAnswer: (questionId: string, text: string) => void;
   toggleMarkForReview: (questionId: string) => void;
   navigateToQuestion: (index: number) => void;
   nextQuestion: () => void;
@@ -82,6 +83,16 @@ export const useExamStore = create<ExamState>((set, get) => ({
     });
   },
 
+  setTextAnswer: (questionId, text) => {
+    set((state) => {
+      const newAnswers = new Map(state.answers);
+      const current = newAnswers.get(questionId);
+      if (!current) return state;
+      newAnswers.set(questionId, { ...current, textAnswer: text, visited: true });
+      return { answers: newAnswers };
+    });
+  },
+
   toggleMarkForReview: (questionId) => {
     set((state) => {
       const newAnswers = new Map(state.answers);
@@ -139,7 +150,9 @@ export const useExamStore = create<ExamState>((set, get) => ({
 
   getAnsweredCount: () => {
     const { answers } = get();
-    return Array.from(answers.values()).filter(a => a.selectedOptions.length > 0).length;
+    return Array.from(answers.values()).filter(
+      a => a.selectedOptions.length > 0 || (a.textAnswer && a.textAnswer.trim() !== '')
+    ).length;
   },
 
   getMarkedCount: () => {
@@ -149,7 +162,10 @@ export const useExamStore = create<ExamState>((set, get) => ({
 
   getUnansweredCount: () => {
     const { questions, answers } = get();
-    return questions.length - Array.from(answers.values()).filter(a => a.selectedOptions.length > 0).length;
+    const answered = Array.from(answers.values()).filter(
+      a => a.selectedOptions.length > 0 || (a.textAnswer && a.textAnswer.trim() !== '')
+    ).length;
+    return questions.length - answered;
   },
 
   getCurrentAnswer: () => {

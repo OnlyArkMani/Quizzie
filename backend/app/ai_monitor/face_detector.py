@@ -43,7 +43,12 @@ class FaceDetector:
         # Head-pose thresholds (degrees). Tunable; defaults are conservative to
         # limit false positives. Yaw = left/right turn, pitch = up/down tilt.
         self._YAW_AWAY_DEG   = 22.0   # |yaw| beyond this → looking away (sideways)
-        self._PITCH_DOWN_DEG = 18.0   # pitch beyond this (head down) → looking_down
+        # Looking DOWN is treated leniently: glancing at the keyboard while
+        # typing/coding is normal. Only a steep, sustained head-down counts (the
+        # "sustained" part is enforced by temporal smoothing, which requires
+        # several consecutive sightings before it penalises), and only at LOW
+        # severity. Raise this to be stricter, lower it to be more sensitive.
+        self._PITCH_DOWN_DEG = 28.0   # steep downward tilt only
         self._GAZE_YAW_GATE  = 18.0   # only trust eye-gaze when head is ~frontal
 
         # 3D generic face model (cm) for solvePnP head-pose estimation.
@@ -135,15 +140,14 @@ class FaceDetector:
                         severity = 'medium'
 
                 if pitch < -self._PITCH_DOWN_DEG:
+                    # Low severity + smoothing: a quick keyboard glance won't be
+                    # penalised; only a steep, sustained head-down will.
                     looking_down = True
-                    looking_at_screen = False
                     flags.append({
                         'type': 'looking_down',
-                        'severity': 'medium',
-                        'message': f'Head tilted down (pitch {pitch:.0f}°) — possible notes/phone'
+                        'severity': 'low',
+                        'message': f'Sustained head-down (pitch {pitch:.0f}°) — possible notes/phone'
                     })
-                    if severity == 'low':
-                        severity = 'medium'
 
                 # Eye gaze — only trusted when the head is roughly frontal, so a
                 # turned head isn't double-counted as off-gaze (head rotation

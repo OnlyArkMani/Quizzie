@@ -21,9 +21,11 @@ from typing import Dict, List
 from app.ai_monitor import scoring
 
 # How many consecutive sightings (within the window) confirm a flag.
+# looking_down is deliberately high so only a *prolonged* head-down (not a
+# keyboard glance) is ever penalised — see FaceDetector pitch handling.
 _THRESHOLDS = {
     scoring.LOOKING_AWAY: 2,
-    scoring.LOOKING_DOWN: 2,
+    scoring.LOOKING_DOWN: 4,
     scoring.GAZE_OFF_SCREEN: 2,
     scoring.MOUTH_MOVEMENT: 3,
     scoring.LOUD_NOISE: 2,

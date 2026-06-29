@@ -7,12 +7,13 @@ interface QuestionCardProps {
 }
 
 const QuestionCard: React.FC<QuestionCardProps> = ({ direction }) => {
-  const { 
-    questions, 
-    currentQuestionIndex, 
-    answers, 
+  const {
+    questions,
+    currentQuestionIndex,
+    answers,
     selectAnswer,
-    toggleMarkForReview 
+    setTextAnswer,
+    toggleMarkForReview
   } = useExamStore();
 
   const currentQuestion = questions[currentQuestionIndex];
@@ -27,6 +28,9 @@ const QuestionCard: React.FC<QuestionCardProps> = ({ direction }) => {
   }
 
   const isMultiple = currentQuestion.question_type === 'multiple';
+  const isCoding = currentQuestion.question_type === 'coding';
+  const isSubjective = currentQuestion.question_type === 'subjective';
+  const isManual = isCoding || isSubjective;
 
   const variants = {
     enter: (direction: string) => ({
@@ -70,6 +74,16 @@ const QuestionCard: React.FC<QuestionCardProps> = ({ direction }) => {
                   Multiple Correct
                 </span>
               )}
+              {isCoding && (
+                <span className="text-xs px-2 py-1 rounded-md bg-sky-50 text-sky-700 font-medium">
+                  Coding{currentQuestion.language ? ` · ${currentQuestion.language}` : ''}
+                </span>
+              )}
+              {isSubjective && (
+                <span className="text-xs px-2 py-1 rounded-md bg-teal-50 text-teal-700 font-medium">
+                  Subjective
+                </span>
+              )}
               {currentQuestion.topic && (
                 <span className="text-xs px-2 py-1 rounded-md bg-purple-50 text-purple-700 font-medium">
                   {currentQuestion.topic}
@@ -101,7 +115,31 @@ const QuestionCard: React.FC<QuestionCardProps> = ({ direction }) => {
           {currentQuestion.question_text}
         </h2>
 
-        {/* Options */}
+        {/* Free-text / code answer for manually graded questions */}
+        {isManual && (
+          <div>
+            <textarea
+              value={currentAnswer?.textAnswer || ''}
+              onChange={(e) => setTextAnswer(currentQuestion.id, e.target.value)}
+              spellCheck={!isCoding}
+              rows={isCoding ? 14 : 8}
+              className={`w-full p-4 rounded-lg border-2 border-slate-200 focus:border-indigo-500 focus:outline-none resize-y bg-white text-slate-800 ${
+                isCoding ? 'font-mono text-sm whitespace-pre' : 'text-base'
+              }`}
+              placeholder={
+                isCoding
+                  ? `Write your ${currentQuestion.language || 'code'} here...`
+                  : 'Type your answer here...'
+              }
+            />
+            <p className="text-xs text-slate-500 mt-2">
+              This answer is reviewed and graded manually after the exam.
+            </p>
+          </div>
+        )}
+
+        {/* Options (MCQ only) */}
+        {!isManual && (
         <div className="space-y-3">
           {currentQuestion.options.map((option, index) => {
             const isSelected = currentAnswer?.selectedOptions.includes(index);
@@ -160,6 +198,7 @@ const QuestionCard: React.FC<QuestionCardProps> = ({ direction }) => {
             );
           })}
         </div>
+        )}
       </motion.div>
     </AnimatePresence>
   );

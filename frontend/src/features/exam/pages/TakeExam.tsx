@@ -172,6 +172,7 @@ const TakeExam = () => {
         const responses = Array.from(answersRef.current.values()).map((a: any) => ({
           question_id: a.questionId,
           selected_option_ids: [],
+          answer_text: a.textAnswer || null,
           marked_for_review: a.markedForReview,
         }));
         navigator.sendBeacon(
@@ -271,6 +272,7 @@ const TakeExam = () => {
         return {
           question_id: a.questionId,
           selected_option_ids: mappedOptionIds as string[],
+          answer_text: a.textAnswer || null,
           marked_for_review: a.markedForReview,
         };
       });
