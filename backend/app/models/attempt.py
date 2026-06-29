@@ -40,7 +40,10 @@ class Response(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     attempt_id = Column(UUID(as_uuid=True), ForeignKey("exam_attempts.id", ondelete="CASCADE"))
     question_id = Column(UUID(as_uuid=True), ForeignKey("questions.id"))
-    selected_option_ids = Column(ARRAY(UUID(as_uuid=True)), nullable=False)
+    # MCQ selections. Nullable now that coding/subjective answers use answer_text.
+    selected_option_ids = Column(ARRAY(UUID(as_uuid=True)), nullable=True)
+    # Free-text answer for coding/subjective questions (manually graded).
+    answer_text = Column(String, nullable=True)
     is_correct = Column(Boolean, nullable=True)
     marks_awarded = Column(Numeric(5, 2), nullable=True)
     marked_for_review = Column(Boolean, default=False)

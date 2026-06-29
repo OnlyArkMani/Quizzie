@@ -8,10 +8,17 @@ from app.core.database import Base
 class QuestionType(str, enum.Enum):
     SINGLE = "single"
     MULTIPLE = "multiple"
+    CODING = "coding"          # free-form code answer, manually graded
+    SUBJECTIVE = "subjective"  # free-text answer, manually graded
+
+
+# Question types that have no options and are graded manually by an examiner.
+MANUAL_QUESTION_TYPES = {QuestionType.CODING.value, QuestionType.SUBJECTIVE.value}
+
 
 class Question(Base):
     __tablename__ = "questions"
-    
+
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     exam_id = Column(UUID(as_uuid=True), ForeignKey("exams.id", ondelete="CASCADE"))
     question_text = Column(String, nullable=False)
@@ -19,7 +26,12 @@ class Question(Base):
     marks = Column(Integer, nullable=False, default=1)
     topic = Column(String(100), nullable=True)
     display_order = Column(Integer, nullable=False)
-    
+    # For coding/subjective questions: an optional model answer or grading rubric
+    # shown to the examiner while grading. `language` is the code language for
+    # coding questions (e.g. 'python'); NULL for other types.
+    reference_answer = Column(String, nullable=True)
+    language = Column(String(50), nullable=True)
+
     # Relationships
     exam = relationship("Exam", back_populates="questions")
     options = relationship("Option", back_populates="question", cascade="all, delete-orphan")

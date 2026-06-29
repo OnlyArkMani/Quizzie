@@ -24,7 +24,7 @@ from app.models.user import User
 from app.models.exam import Exam
 from app.models.attempt import ExamAttempt, Response, AttemptStatus
 from app.models.question import Question
-from app.schemas.response import AttemptCreate, AttemptSubmit, Attempt as AttemptSchema
+from app.schemas.response import AttemptCreate, AttemptSubmit, Attempt as AttemptSchema, GradeRequest
 from app.api.deps import get_current_user, require_role
 from app.services.evaluation_service import EvaluationService
 
@@ -151,7 +151,8 @@ async def submit_exam(
         db.add(Response(
             attempt_id=attempt_id,
             question_id=rd.question_id,
-            selected_option_ids=rd.selected_option_ids,
+            selected_option_ids=rd.selected_option_ids or [],
+            answer_text=rd.answer_text,
             marked_for_review=rd.marked_for_review,
         ))
 
@@ -236,9 +237,28 @@ def get_results(
         float(r.marks_awarded) for r in responses if r.marks_awarded is not None
     )
 
+    # Count coding/subjective answers still awaiting examiner grading so the
+    # results screen can show "pending grading" instead of a misleading final %.
+    from app.models.question import MANUAL_QUESTION_TYPES
+    q_map = {
+        q.id: q for q in db.query(Question).filter(
+            Question.id.in_([r.question_id for r in responses] or [None])
+        ).all()
+    }
+
+    def _qt(q):
+        return q.question_type.value if hasattr(q.question_type, "value") else str(q.question_type)
+
+    pending_grading = sum(
+        1 for r in responses
+        if (q := q_map.get(r.question_id)) is not None
+        and _qt(q) in MANUAL_QUESTION_TYPES
+        and r.marks_awarded is None
+    )
+
     topic_wise: dict = {}
     for r in responses:
-        q = db.query(Question).filter(Question.id == r.question_id).first()
+        q = q_map.get(r.question_id)
         if q and q.topic:
             if q.topic not in topic_wise:
                 topic_wise[q.topic] = {"correct": 0, "total": 0, "percentage": 0.0}
@@ -259,6 +279,8 @@ def get_results(
         "time_taken_seconds": attempt.time_taken_seconds,
         "cheating_flags": attempt.cheating_flags or 0,
         "pass_percentage": float(exam.pass_percentage),
+        "needs_grading": pending_grading > 0,
+        "pending_grading": pending_grading,
         "topic_wise": topic_wise,
     }
 
@@ -289,3 +311,128 @@ def auto_save_progress(
     if not attempt or str(attempt.student_id) != str(current_user.id):
         raise HTTPException(status_code=403, detail="Not authorized")
     return {"message": "Progress saved", "saved": len(body.responses)}
+
+
+# ── Manual grading (coding / subjective) ────────────────────────────────────────
+
+def _require_exam_owner(db: Session, attempt: ExamAttempt, current_user: User) -> Exam:
+    """Ensure the caller is the examiner who owns this attempt's exam (or admin)."""
+    role = current_user.role.value if hasattr(current_user.role, "value") else str(current_user.role)
+    if role not in ("examiner", "admin"):
+        raise HTTPException(status_code=403, detail="Examiners only")
+    exam = db.query(Exam).filter(Exam.id == attempt.exam_id).first()
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found")
+    if role == "examiner" and str(exam.created_by) != str(current_user.id):
+        raise HTTPException(status_code=403, detail="Not authorized to grade this exam")
+    return exam
+
+
+@router.get("/{attempt_id}/grading")
+def get_grading_queue(
+    attempt_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List the coding/subjective answers in an attempt that an examiner grades."""
+    from app.models.question import MANUAL_QUESTION_TYPES
+
+    attempt = db.query(ExamAttempt).filter(ExamAttempt.id == attempt_id).first()
+    if not attempt:
+        raise HTTPException(status_code=404, detail="Attempt not found")
+    _require_exam_owner(db, attempt, current_user)
+
+    responses = db.query(Response).filter(Response.attempt_id == attempt_id).all()
+    q_map = {
+        q.id: q for q in db.query(Question).filter(
+            Question.id.in_([r.question_id for r in responses] or [None])
+        ).all()
+    }
+
+    def _qt(q):
+        return q.question_type.value if hasattr(q.question_type, "value") else str(q.question_type)
+
+    items = []
+    for r in responses:
+        q = q_map.get(r.question_id)
+        if not q or _qt(q) not in MANUAL_QUESTION_TYPES:
+            continue
+        items.append({
+            "response_id": str(r.id),
+            "question_id": str(q.id),
+            "question_text": q.question_text,
+            "question_type": _qt(q),
+            "language": q.language,
+            "reference_answer": q.reference_answer,
+            "max_marks": q.marks,
+            "answer_text": r.answer_text or "",
+            "marks_awarded": float(r.marks_awarded) if r.marks_awarded is not None else None,
+        })
+
+    return {
+        "attempt_id": str(attempt_id),
+        "items": items,
+        "pending": sum(1 for it in items if it["marks_awarded"] is None),
+    }
+
+
+@router.post("/{attempt_id}/grade")
+def grade_attempt(
+    attempt_id: UUID,
+    body: GradeRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Set examiner marks for coding/subjective responses, then recompute the
+    attempt's overall score from all graded marks.
+    """
+    attempt = db.query(ExamAttempt).filter(ExamAttempt.id == attempt_id).first()
+    if not attempt:
+        raise HTTPException(status_code=404, detail="Attempt not found")
+    _require_exam_owner(db, attempt, current_user)
+
+    responses = {r.id: r for r in db.query(Response).filter(Response.attempt_id == attempt_id).all()}
+    q_map = {q.id: q for q in db.query(Question).filter(
+        Question.id.in_([r.question_id for r in responses.values()] or [None])
+    ).all()}
+
+    for item in body.grades:
+        r = responses.get(item.response_id)
+        if not r:
+            raise HTTPException(status_code=404, detail=f"Response {item.response_id} not found")
+        q = q_map.get(r.question_id)
+        max_marks = q.marks if q else 0
+        if item.marks_awarded < 0 or item.marks_awarded > max_marks:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Marks must be between 0 and {max_marks} for response {item.response_id}"
+            )
+        r.marks_awarded = item.marks_awarded
+
+    # Recompute overall score across all responses.
+    all_responses = list(responses.values())
+    total_marks = sum((q_map[r.question_id].marks for r in all_responses if r.question_id in q_map), 0)
+    obtained = sum(float(r.marks_awarded) for r in all_responses if r.marks_awarded is not None)
+    attempt.score = (obtained / total_marks * 100) if total_marks > 0 else 0
+    attempt.status = AttemptStatus.EVALUATED
+
+    db.commit()
+
+    def _qt(q):
+        return q.question_type.value if hasattr(q.question_type, "value") else str(q.question_type)
+
+    from app.models.question import MANUAL_QUESTION_TYPES
+    pending = sum(
+        1 for r in all_responses
+        if r.question_id in q_map and _qt(q_map[r.question_id]) in MANUAL_QUESTION_TYPES
+        and r.marks_awarded is None
+    )
+
+    return {
+        "attempt_id": str(attempt_id),
+        "score": float(attempt.score),
+        "obtained_marks": obtained,
+        "total_marks": total_marks,
+        "pending_grading": pending,
+    }

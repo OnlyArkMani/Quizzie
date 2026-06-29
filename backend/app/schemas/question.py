@@ -20,7 +20,11 @@ class QuestionCreate(BaseModel):
     marks: int = 1
     topic: Optional[str] = None
     display_order: int = 0
-    options: List[OptionCreate]
+    # Optional for coding/subjective questions (which have no options).
+    options: List[OptionCreate] = []
+    # Coding/subjective only: model answer / rubric and (coding) language.
+    reference_answer: Optional[str] = None
+    language: Optional[str] = None
 
 class Question(QuestionCreate):
     id: UUID

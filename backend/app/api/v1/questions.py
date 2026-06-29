@@ -36,26 +36,30 @@ def add_question(
         )
     
     # Validate question type
-    if question_data.question_type not in ["single", "multiple"]:
+    if question_data.question_type not in ["single", "multiple", "coding", "subjective"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid question type"
         )
-    
-    # Validate options
-    if len(question_data.options) < 2:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="At least 2 options required"
-        )
-    
-    correct_options = [opt for opt in question_data.options if opt.is_correct]
-    if len(correct_options) == 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="At least one correct option required"
-        )
-    
+
+    is_manual = question_data.question_type in ("coding", "subjective")
+
+    # MCQ questions need at least 2 options and a correct answer. Coding /
+    # subjective questions are graded manually and carry no options.
+    if not is_manual:
+        if len(question_data.options) < 2:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="At least 2 options required"
+            )
+
+        correct_options = [opt for opt in question_data.options if opt.is_correct]
+        if len(correct_options) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="At least one correct option required"
+            )
+
     # Create question
     new_question = Question(
         exam_id=exam_id,
@@ -63,25 +67,28 @@ def add_question(
         question_type=question_data.question_type,
         marks=question_data.marks,
         topic=question_data.topic,
-        display_order=question_data.display_order
+        display_order=question_data.display_order,
+        reference_answer=question_data.reference_answer if is_manual else None,
+        language=question_data.language if question_data.question_type == "coding" else None,
     )
-    
+
     db.add(new_question)
     db.flush()
-    
-    # Create options
-    for opt_data in question_data.options:
-        new_option = Option(
-            question_id=new_question.id,
-            option_text=opt_data.option_text,
-            is_correct=opt_data.is_correct,
-            display_order=opt_data.display_order
-        )
-        db.add(new_option)
-    
+
+    # Create options (MCQ only)
+    if not is_manual:
+        for opt_data in question_data.options:
+            new_option = Option(
+                question_id=new_question.id,
+                option_text=opt_data.option_text,
+                is_correct=opt_data.is_correct,
+                display_order=opt_data.display_order
+            )
+            db.add(new_option)
+
     db.commit()
     db.refresh(new_question)
-    
+
     return new_question
 
 @router.get("/{exam_id}/questions", response_model=List[QuestionSchema])

@@ -10,8 +10,13 @@ from uuid import UUID
 from typing import Dict
 
 from app.models.attempt import ExamAttempt, Response, AttemptStatus
-from app.models.question import Question, Option
+from app.models.question import Question, Option, MANUAL_QUESTION_TYPES
 from app.models.exam import Exam
+
+
+def _qtype(question) -> str:
+    qt = question.question_type
+    return qt.value if hasattr(qt, "value") else str(qt)
 
 
 class EvaluationService:
@@ -50,8 +55,9 @@ class EvaluationService:
         }
 
         total_marks = 0
-        obtained_marks = 0
+        obtained_marks = 0.0
         correct_count = 0
+        pending_grading = 0
         topic_stats: Dict[str, Dict] = {}
 
         for response in responses:
@@ -60,10 +66,21 @@ class EvaluationService:
                 continue
 
             total_marks += question.marks
-            selected = set(response.selected_option_ids)
+
+            # Coding/subjective: graded manually by an examiner. Never auto-score
+            # or overwrite an examiner's marks — just tally what's already graded
+            # and flag the rest as pending.
+            if _qtype(question) in MANUAL_QUESTION_TYPES:
+                if response.marks_awarded is not None:
+                    obtained_marks += float(response.marks_awarded)
+                else:
+                    pending_grading += 1
+                continue
+
+            selected = set(response.selected_option_ids or [])
             correct = correct_opts.get(question.id, set())
 
-            is_correct = correct == selected
+            is_correct = bool(correct) and correct == selected
             marks = question.marks if is_correct else 0
 
             response.is_correct = is_correct
@@ -90,5 +107,7 @@ class EvaluationService:
             "obtained_marks": float(obtained_marks),
             "total_marks": total_marks,
             "correct_count": correct_count,
+            "needs_grading": pending_grading > 0,
+            "pending_grading": pending_grading,
             "topic_wise": topic_stats,
         }
