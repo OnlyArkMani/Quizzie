@@ -25,6 +25,23 @@
 
 ---
 
+## System Design Upgrade (September 2026)
+
+Auditing and load-testing the original code showed the "500+ concurrent students" claim did not hold, and several exam-integrity rules were enforced only by the browser. Highlights of what changed, each with a design record and before/after measurements:
+
+- **The API deadlocked at 200 simultaneous "Start exam" clicks** (0/200 succeeded; thread pool and DB pool waiting on each other). Fixed with a unit-of-work rule: a transaction never outlives the threadpool call that opened it. Now 200/200.
+- **Auto-save was a no-op.** Now durable, idempotent delta saves (`INSERT ... ON CONFLICT ... WHERE client_seq <= EXCLUDED.client_seq`); 0 of 2,888 answers lost in a 200-student crash test.
+- **The exam timer was client-only**; the server now owns the deadline.
+- **The answer key was sent to students**; now stripped server-side.
+- **Race conditions** (duplicate attempts, double submits, lost health updates) reproduced at up to 19/20 trials, now 0/20, enforced by the database.
+- Rate limits and smoothing moved from per-process dicts to Redis; proctoring updates fan out to WebSockets across processes via Redis pub/sub; cache stampede protection.
+- **Proctoring uploads no longer pile up** when workers fall behind: a per-student latest-frame mailbox bounds the queue and Redis memory (100 students, no consumer, 20 s: 995 queued tasks / +187 MB → 100 / +11.7 MB).
+- Server-side logout / token revocation, safe boot-time migrations across many processes, a stated DB connection budget, results polling that no longer re-grades, health polls with zero SQL, and answers that survive closing the tab while offline.
+
+Read: [Upgrade plan](docs/UPGRADE_PLAN.md) · [HLD](docs/HLD.md) · [LLD](docs/LLD.md) · [ADRs](docs/adr/) · [Benchmarks](docs/BENCHMARKS.md) · [Load tests](backend/loadtest/README.md)
+
+---
+
 ## Table of Contents
 
 - [Overview](#overview)
