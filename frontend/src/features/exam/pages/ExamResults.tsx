@@ -77,13 +77,28 @@ const ExamResults = () => {
   const [violations, setViolations] = useState<any[]>([]);
   const [suspicion,  setSuspicion]  = useState<any>(null);
   const [loading,    setLoading]    = useState(true);
+  const [evaluating, setEvaluating] = useState(false);
 
   useEffect(() => { if (attemptId) fetchResults(); }, [attemptId]);
+
+  // GET /results answers 202 {status: "evaluating"} while the queued evaluation
+  // runs; poll with backoff instead of making the server evaluate on every hit.
+  const fetchResultsWhenReady = async () => {
+    let delay = 1000;
+    for (let i = 0; i < 30; i++) {
+      const res = await api.get(`/attempts/${attemptId}/results`);
+      if (res.status !== 202 && res.data?.status !== 'evaluating') return res;
+      setEvaluating(true);
+      await new Promise(r => setTimeout(r, delay));
+      delay = Math.min(delay * 1.5, 5000);
+    }
+    throw new Error('Evaluation is taking longer than expected');
+  };
 
   const fetchResults = async () => {
     try {
       const [resultsRes, violationsRes, suspicionRes] = await Promise.allSettled([
-        api.get(`/attempts/${attemptId}/results`),
+        fetchResultsWhenReady(),
         api.get(`/monitor/enhanced/attempt/${attemptId}/violations`),
         api.get(`/monitor/enhanced/attempt/${attemptId}/suspicion-score`),
       ]);
@@ -94,13 +109,15 @@ const ExamResults = () => {
     } catch (error) {
       console.error('Failed to fetch results:', error);
     } finally {
+      setEvaluating(false);
       setLoading(false);
     }
   };
 
   if (loading) return (
-    <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+    <div className="min-h-screen bg-slate-50 flex flex-col items-center justify-center gap-4">
       <div className="w-12 h-12 border-4 border-indigo-200 border-t-indigo-600 rounded-full animate-spin" />
+      {evaluating && <p className="text-slate-500 text-sm">Grading your answers…</p>}
     </div>
   );
 

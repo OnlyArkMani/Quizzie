@@ -56,12 +56,13 @@ const HealthBar: React.FC<HealthBarProps> = ({
   // WebSocket connection for real-time updates
   useEffect(() => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = window.location.hostname;
+    // Same origin as the page (Vite / nginx proxy it) — not a hard-coded :8000.
+    const host = window.location.host;
 
     // The WS endpoint now requires auth; browsers can't set WS headers, so the
     // JWT is passed as a query param and validated server-side.
     const token = useAuthStore.getState().token;
-    const wsUrl = `${protocol}//${host}:8000/api/v1/monitor/enhanced/ws/proctoring/${attemptId}?token=${encodeURIComponent(token || '')}`;
+    const wsUrl = `${protocol}//${host}/api/v1/monitor/enhanced/ws/proctoring/${attemptId}?token=${encodeURIComponent(token || '')}`;
 
     let websocket: WebSocket;
     // FIX: Use number instead of NodeJS.Timeout — browser setTimeout/setInterval return number.
@@ -93,6 +94,10 @@ const HealthBar: React.FC<HealthBarProps> = ({
             if (newHealth.percentage <= 0 && onHealthZero) {
               onHealthZero();
             }
+          }
+
+          if (data.type === 'auto_submitted' && onHealthZero) {
+            onHealthZero();
           }
 
           if (data.type === 'violation_alert') {
@@ -129,10 +134,12 @@ const HealthBar: React.FC<HealthBarProps> = ({
     };
   }, [attemptId, onHealthZero]);
 
-  // HTTP polling fallback. Camera/audio analysis runs in the Celery worker,
-  // which can't push to the in-process WebSocket, so poll the persisted health
-  // so worker-applied changes still show up. (The WS gives instant updates for
-  // client-reported events; this catches everything else.)
+  // HTTP polling backstop. Worker-side (camera/audio) health changes are now
+  // pushed over the WebSocket via Redis pub/sub, but pub/sub is at-most-once:
+  // a message published while this socket was reconnecting is simply gone.
+  // Health updates are full snapshots, so a slow poll of the persisted value
+  // is enough to self-heal any missed push. (Served from a Redis snapshot
+  // server-side, so it costs no DB query.)
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
@@ -144,10 +151,12 @@ const HealthBar: React.FC<HealthBarProps> = ({
         if (h.percentage <= 0 && onHealthZero) onHealthZero();
       } catch { /* silent — best effort */ }
     };
-    const id = window.setInterval(poll, 6000);
+    // Push is the primary channel; the poll is only a safety net. Poll rarely
+    // while the socket is up, often while it's down.
+    const id = window.setInterval(poll, isConnected ? 60000 : 10000);
     poll();
     return () => { cancelled = true; clearInterval(id); };
-  }, [attemptId, onHealthZero]);
+  }, [attemptId, onHealthZero, isConnected]);
 
   const getHealthColor = useCallback(() => {
     if (health.percentage > 70) return 'bg-emerald-500';

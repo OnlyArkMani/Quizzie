@@ -4,7 +4,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Palette, AlertTriangle, Maximize, ShieldAlert } from 'lucide-react';
 import { useToastStore } from '@/shared/components/feedback/Toast';
 
-import { useExamStore } from '../store/examStore';
+import { useExamStore, toApiResponse } from '../store/examStore';
+import { useAutoSave, restorePendingAnswers, clearPendingAnswers } from '../hooks/useAutoSave';
 import QuestionCard from '../components/QuestionCard';
 import QuestionPalette from '../components/QuestionPalette';
 import ExamTimer from '../components/ExamTimer';
@@ -14,6 +15,9 @@ import HealthBar from '../components/HealthBar';
 import CameraProctoring from '../components/CameraProctoring';
 
 import api from '@/lib/api';
+import { AttemptState } from '@/types';
+
+const TIME_UP_JITTER_MS = 10_000;
 
 const TakeExam = () => {
   const { examId } = useParams();
@@ -22,13 +26,13 @@ const TakeExam = () => {
   const {
     questions,
     currentQuestionIndex,
-    isSubmitted,
     attemptId,
     initExam,
     nextQuestion,
     prevQuestion,
     submitExam,
-    answers,
+    timeRemaining,
+    deadlineMs,
   } = useExamStore();
 
   const { addToast } = useToastStore();
@@ -55,9 +59,6 @@ const TakeExam = () => {
 
   const hasSubmittedRef = useRef(false);
   const healthZeroTriggeredRef = useRef(false);
-  const answersRef      = useRef(answers);
-
-  useEffect(() => { answersRef.current = answers; }, [answers]);
 
   const handleNextQuestion = () => { setSlideDirection('forward');  nextQuestion(); };
   const handlePrevQuestion = () => { setSlideDirection('backward'); prevQuestion(); };
@@ -164,26 +165,19 @@ const TakeExam = () => {
   }, [isFullscreenStart, attemptId]);
 
   /* ----------------------------------------------------------------
-     Before-unload beacon
+     Durable auto-save (replaces the old before-unload "submit" beacon,
+     which never worked: sendBeacon can't carry the auth header, and it
+     would have SUBMITTED the exam with every MCQ answer blank on a reload).
+     A reload now simply resumes the attempt from the server.
   ---------------------------------------------------------------- */
-  useEffect(() => {
-    const handleBeforeUnload = () => {
-      if (!hasSubmittedRef.current && attemptId && exam) {
-        const responses = Array.from(answersRef.current.values()).map((a: any) => ({
-          question_id: a.questionId,
-          selected_option_ids: [],
-          answer_text: a.textAnswer || null,
-          marked_for_review: a.markedForReview,
-        }));
-        navigator.sendBeacon(
-          `http://localhost:8000/api/v1/attempts/${attemptId}/submit`,
-          new Blob([JSON.stringify({ responses })], { type: 'application/json' })
-        );
-      }
-    };
-    window.addEventListener('beforeunload', handleBeforeUnload);
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, [attemptId, exam]);
+  useAutoSave(() => {
+    addToast('Time is over — your saved answers have been submitted.', 'warning');
+    hasSubmittedRef.current = true;
+    submitExam();
+    const closedId = useExamStore.getState().attemptId;
+    if (closedId) clearPendingAnswers(closedId);
+    navigate(`/student/exam/${examId}/results`, { state: { attemptId: useExamStore.getState().attemptId } });
+  });
 
   /* ----------------------------------------------------------------
      Exam pause on critical violation
@@ -240,14 +234,26 @@ const TakeExam = () => {
         return;
       }
 
-      const attemptIdFromState = window.history.state?.usr?.attemptId;
-      if (!attemptIdFromState) {
-        alert('No attempt found. Please restart the exam.');
-        navigate('/student');
+      // The lobby passes the attempt id in history state; if it's missing
+      // (new tab, bookmark), /start is idempotent and returns the active one.
+      let resolvedAttemptId: string | undefined = window.history.state?.usr?.attemptId;
+      if (!resolvedAttemptId) {
+        const started = await api.post('/attempts/start', { exam_id: examId });
+        resolvedAttemptId = started.data.id;
+      }
+
+      // Server state = source of truth for answers AND the clock.
+      const stateRes = await api.get<AttemptState>(`/attempts/${resolvedAttemptId}/state`);
+      if (stateRes.data.status !== 'in_progress') {
+        navigate(`/student/exam/${examId}/results`, { state: { attemptId: resolvedAttemptId } });
         return;
       }
 
-      initExam(examId!, questionsRes.data, examRes.data.duration_minutes * 60, attemptIdFromState);
+      initExam(examId!, questionsRes.data, resolvedAttemptId!, stateRes.data);
+      // Answers edited while offline in a previous (closed) tab: re-apply the
+      // ones newer than the server's copy; the auto-saver will upload them.
+      const restored = restorePendingAnswers(resolvedAttemptId!);
+      if (restored) addToast(`Restored ${restored} unsaved answer(s) from this device.`, 'success');
       setLoading(false);
     } catch {
       alert('Failed to load exam.');
@@ -260,37 +266,73 @@ const TakeExam = () => {
   ---------------------------------------------------------------- */
   const handleSubmit = () => setShowSubmitModal(true);
 
+  // One key per page lifetime: every retry of THIS submit reuses it, so the
+  // server can recognise a retry and return the original success.
+  const idempotencyKeyRef = useRef<string>(
+    (globalThis.crypto && 'randomUUID' in globalThis.crypto)
+      ? globalThis.crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`
+  );
+
   const confirmSubmit = async () => {
     if (hasSubmittedRef.current) return;
     hasSubmittedRef.current = true;
     setIsSubmitting(true);
     setShowSubmitModal(false);
-    try {
-      const responses = Array.from(useExamStore.getState().answers.values()).map(a => {
-        const question = questions.find(q => q.id === a.questionId);
-        const mappedOptionIds = a.selectedOptions.map(idx => question?.options[idx]?.id).filter(Boolean);
-        return {
-          question_id: a.questionId,
-          selected_option_ids: mappedOptionIds as string[],
-          answer_text: a.textAnswer || null,
-          marked_for_review: a.markedForReview,
-        };
-      });
-      await api.post(`/attempts/${attemptId}/submit`, { responses });
-      submitExam();
-      navigate(`/student/exam/${examId}/results`, { state: { attemptId } });
-    } catch (error: any) {
-      if (error?.response?.status === 400 && error.response.data?.detail === "Attempt already submitted") {
+    const { answers: current, questions: qs, attemptId: aid } = useExamStore.getState();
+    const responses = Array.from(current.values()).map(a => toApiResponse(a, qs));
+
+    // Retry transient failures (network blip at the worst moment) with the SAME
+    // idempotency key — safe precisely because the server dedupes on it.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        await api.post(`/attempts/${aid}/submit`, { responses }, {
+          headers: { 'Idempotency-Key': idempotencyKeyRef.current },
+        });
         submitExam();
-        navigate(`/student/exam/${examId}/results`, { state: { attemptId } });
+        clearPendingAnswers(aid!);
+        navigate(`/student/exam/${examId}/results`, { state: { attemptId: aid } });
         return;
+      } catch (error: any) {
+        const status = error?.response?.status;
+        if (status === 400 && error.response.data?.detail === "Attempt already submitted") {
+          submitExam();
+          navigate(`/student/exam/${examId}/results`, { state: { attemptId: aid } });
+          return;
+        }
+        if (status && status < 500) {
+          addToast(error?.response?.data?.detail || 'Failed to submit exam.', 'error');
+          break;
+        }
+        await new Promise(r => setTimeout(r, 1000 * 2 ** attempt));
       }
-      addToast(error?.response?.data?.detail || 'Failed to submit exam.', 'error');
-      hasSubmittedRef.current = false;
-      setIsSubmitting(false);
-      // We don't reset health zero, to prevent infinite loops from the websocket
     }
+    addToast('Could not reach the server. Your answers are saved — please try submitting again.', 'error');
+    hasSubmittedRef.current = false;
+    setIsSubmitting(false);
+    // We don't reset health zero, to prevent infinite loops from the websocket
   };
+
+  /* ----------------------------------------------------------------
+     Time's up (per the server-derived countdown) -> submit automatically.
+     If this request never arrives, the server closes the attempt itself
+     at deadline + grace using the auto-saved answers.
+  ---------------------------------------------------------------- */
+  // Jitter: students who started together all hit 0 in the same second.
+  // Spreading the auto-submits over 0–10 s turns a thundering herd (N submits
+  // + N evaluations in one second) into a ramp. Safe because the server
+  // accepts submits for SUBMIT_GRACE_SECONDS (30 s) after the deadline and all
+  // answers are already auto-saved; the UI locks immediately.
+  const timeUpScheduledRef = useRef(false);
+  useEffect(() => {
+    if (!loading && deadlineMs !== null && timeRemaining === 0
+        && !hasSubmittedRef.current && !timeUpScheduledRef.current) {
+      timeUpScheduledRef.current = true;
+      setIsSubmitting(true);                        // lock the UI now
+      addToast("Time's up — submitting your exam.", 'warning');
+      window.setTimeout(() => confirmSubmit(), Math.random() * TIME_UP_JITTER_MS);
+    }
+  }, [timeRemaining, deadlineMs, loading]);
 
   const handleHealthZero = () => {
     if (healthZeroTriggeredRef.current) return;
@@ -413,7 +455,7 @@ const TakeExam = () => {
             >
               <ShieldAlert className="w-16 h-16 text-rose-400 mx-auto mb-4 animate-pulse" />
               <h2 className="text-2xl font-bold text-white mb-2">Exam Paused</h2>
-              <p className="text-slate-300 mb-2 text-sm">A critical violation was detected. Your exam timer has been paused.</p>
+              <p className="text-slate-300 mb-2 text-sm">A critical violation was detected. Note: the exam clock keeps running.</p>
               <p className="text-rose-300 text-sm mb-8 bg-rose-900/30 rounded-lg px-4 py-2">{pauseReason}</p>
               <p className="text-slate-400 text-xs mb-6">
                 Please face the camera directly and click the button below to resume.

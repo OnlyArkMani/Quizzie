@@ -1,43 +1,21 @@
-import { useState, useEffect } from 'react';
-import { Cloud, Check, AlertCircle } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { Cloud, Check, AlertCircle, WifiOff } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useExamStore } from '../store/examStore';
-import api from '@/lib/api';
 
-type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
-
+/** Pure view of the auto-saver's status (the saving itself lives in useAutoSave). */
 const AutoSaveIndicator = () => {
-  const [status, setStatus] = useState<SaveStatus>('idle');
-  const { attemptId, answers } = useExamStore();
+  const saveStatus = useExamStore(s => s.saveStatus);
+  const pending = useExamStore(s => s.dirty.size);
+  const [status, setStatus] = useState(saveStatus);
 
   useEffect(() => {
-    const autoSave = async () => {
-      if (!attemptId || answers.size === 0) return;
-
-      setStatus('saving');
-
-      try {
-        const responses = Array.from(answers.values()).map(answer => ({
-          question_id: answer.questionId,
-          selected_option_ids: answer.selectedOptions,
-          marked_for_review: answer.markedForReview,
-        }));
-
-        await api.post(`/attempts/${attemptId}/auto-save`, { responses });
-        
-        setStatus('saved');
-        setTimeout(() => setStatus('idle'), 2000);
-      } catch (error) {
-        console.error('Auto-save failed:', error);
-        setStatus('error');
-        setTimeout(() => setStatus('idle'), 3000);
-      }
-    };
-
-    const interval = setInterval(autoSave, 10000); // Auto-save every 10 seconds
-
-    return () => clearInterval(interval);
-  }, [attemptId, answers]);
+    setStatus(saveStatus);
+    if (saveStatus === 'saved') {
+      const t = window.setTimeout(() => setStatus('idle'), 2000);
+      return () => window.clearTimeout(t);
+    }
+  }, [saveStatus]);
 
   return (
     <AnimatePresence mode="wait">
@@ -65,7 +43,14 @@ const AutoSaveIndicator = () => {
           {status === 'error' && (
             <>
               <AlertCircle className="w-4 h-4 text-rose-400" />
-              <span className="text-rose-400">Save failed</span>
+              <span className="text-rose-400">Save failed — retrying ({pending} unsaved)</span>
+            </>
+          )}
+
+          {status === 'offline' && (
+            <>
+              <WifiOff className="w-4 h-4 text-amber-400" />
+              <span className="text-amber-400">Offline — {pending} answer(s) will sync when you reconnect</span>
             </>
           )}
         </motion.div>
@@ -74,4 +59,4 @@ const AutoSaveIndicator = () => {
   );
 };
 
-export default AutoSaveIndicator;
+export default AutoSaveIndicator;

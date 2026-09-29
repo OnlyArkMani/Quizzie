@@ -4,18 +4,24 @@ import { Clock, PauseCircle } from 'lucide-react';
 import { useExamStore } from '../store/examStore';
 
 interface ExamTimerProps {
+  /** Visual only: the server's deadline keeps running while the exam is "paused". */
   paused?: boolean;
 }
 
+/*
+ * Display-only countdown. Each tick RECOMPUTES remaining time from the server
+ * deadline (store.tick) instead of decrementing a counter, so a throttled
+ * background tab or a sleeping laptop can't drift the timer.
+ */
 const ExamTimer = ({ paused = false }: ExamTimerProps) => {
-  const { timeRemaining, decrementTimer } = useExamStore();
+  const { timeRemaining, tick } = useExamStore();
   const [isWarning, setIsWarning] = useState(false);
 
   useEffect(() => {
-    if (paused) return;  // don't tick when exam is paused
-    const interval = setInterval(() => { decrementTimer(); }, 1000);
+    tick();
+    const interval = setInterval(tick, 1000);
     return () => clearInterval(interval);
-  }, [decrementTimer, paused]);
+  }, [tick]);
 
   useEffect(() => { setIsWarning(timeRemaining < 300); }, [timeRemaining]);
 

@@ -47,6 +47,8 @@ interface DetectionResult {
 // violation). Only client-detected events (tab switch / blur) are reported via
 // /monitor/enhanced/violation, keeping a one-warning grace before penalising.
 const GRACE_PERIOD_MS = 15_000;  // 15 s no monitoring after exam starts
+const FRAME_MAX_WIDTH = 640;
+const FRAME_JPEG_QUALITY = 0.7;
 const RECOVERY_INTERVAL_MS = 60_000; // recover health every 60 s of clean behaviour
 
 const CameraProctoring: React.FC<CameraProctoringProps> = ({
@@ -259,8 +261,16 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
       const canvas = canvasRef.current;
       const context = canvas.getContext('2d');
       if (!context) return;
-      canvas.width  = video.videoWidth;
-      canvas.height = video.videoHeight;
+      // Downscale before upload. The old code sent the camera's native
+      // resolution (typically 1280x720, JPEG q=0.8, ~80-150 KB) every 2 s per
+      // student, base64'd through the task broker. 640 px wide at q=0.7 is
+      // roughly 4x fewer pixels and ~25-50 KB. MediaPipe's detectors resize to
+      // small fixed inputs (128-256 px) anyway, and a webcam face crop at
+      // 640 px stays well above that. (Re-check false-positive rates after
+      // changing this — see docs/adr/0010.)
+      const scale = Math.min(1, FRAME_MAX_WIDTH / (video.videoWidth || FRAME_MAX_WIDTH));
+      canvas.width  = Math.round(video.videoWidth * scale);
+      canvas.height = Math.round(video.videoHeight * scale);
       context.drawImage(video, 0, 0, canvas.width, canvas.height);
 
       canvas.toBlob(async (blob) => {
@@ -296,7 +306,7 @@ const CameraProctoring: React.FC<CameraProctoringProps> = ({
             cleanStreakRef.current += 1;
           }
         } catch { /* silent */ } finally { setIsDetecting(false); }
-      }, 'image/jpeg', 0.8);
+      }, 'image/jpeg', FRAME_JPEG_QUALITY);
     } catch { setIsDetecting(false); }
   }, [attemptId, isDetecting, notifyDetection]);
 
