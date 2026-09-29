@@ -23,7 +23,12 @@ services:
     image: redis:7-alpine
     container_name: quizzie_redis
     restart: unless-stopped
-    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    # volatile-lru, not allkeys-lru: this one Redis is also the Celery broker.
+    # Under memory pressure allkeys-lru may evict a queue (a list with no TTL),
+    # silently dropping queued tasks. volatile-lru only evicts keys that have a
+    # TTL (cache, locks, rate-limit windows all do); if nothing is evictable,
+    # writes fail loudly instead (backpressure, not data loss).
+    command: redis-server --maxmemory 256mb --maxmemory-policy volatile-lru
     ports:
       - "6379:6379"
     healthcheck:
@@ -31,6 +36,31 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  # ─── PgBouncer (optional: `docker compose --profile pgbouncer up`) ─────────
+  # Connection budget without PgBouncer (default max_connections = 100):
+  #   backend 4 workers x (10 + 5)          = 60
+  #   celery_proctoring 4 procs x (2 + 0)   =  8
+  #   celery_evaluation 2 procs x (2 + 0)   =  4    -> 72 of 100, 28 spare
+  # Adding API replicas multiplies the first line. Beyond that, point the
+  # backend's DATABASE_URL at pgbouncer:6432 (transaction pooling: thousands of
+  # client connections share ~40 real ones) and keep MIGRATION_DATABASE_URL on
+  # postgres:5432 — the migration advisory lock needs a real session.
+  # Not exercised in this repo's CI; pin an image version before production use.
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    profiles: ["pgbouncer"]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres123}@postgres:5432/${POSTGRES_DB:-quizzie_db}
+      POOL_MODE: transaction
+      MAX_CLIENT_CONN: "2000"
+      DEFAULT_POOL_SIZE: "40"
+      AUTH_TYPE: scram-sha-256
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "6432:5432"
 
   # ─── Backend (FastAPI) ─────────────────────────────────────────────────────
   backend:
@@ -42,8 +72,15 @@ services:
     env_file: ./backend/.env
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres123}@postgres:5432/${POSTGRES_DB:-quizzie_db}
+      MIGRATION_DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres123}@postgres:5432/${POSTGRES_DB:-quizzie_db}
       REDIS_URL: redis://redis:6379/0
       WORKERS: "4"
+      DB_POOL_SIZE: "10"
+      DB_MAX_OVERFLOW: "5"
+      # Trust X-Forwarded-For from the nginx container. Safe only while the
+      # backend is reached through nginx; don't publish port 8000 publicly in
+      # production, or clients could spoof their IP to dodge per-IP limits.
+      FORWARDED_ALLOW_IPS: "*"
     depends_on:
       postgres:
         condition: service_healthy
@@ -65,6 +102,9 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres123}@postgres:5432/${POSTGRES_DB:-quizzie_db}
       REDIS_URL: redis://redis:6379/0
+      # One task at a time per process: 1-2 connections is all it can use.
+      DB_POOL_SIZE: "2"
+      DB_MAX_OVERFLOW: "0"
     depends_on:
       postgres:
         condition: service_healthy
@@ -83,6 +123,8 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres123}@postgres:5432/${POSTGRES_DB:-quizzie_db}
       REDIS_URL: redis://redis:6379/0
+      DB_POOL_SIZE: "2"
+      DB_MAX_OVERFLOW: "0"
     depends_on:
       postgres:
         condition: service_healthy

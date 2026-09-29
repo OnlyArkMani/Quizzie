@@ -112,8 +112,10 @@ services:
   # ── Redis (Celery broker + cache) ────────────────────────────────────────
   - type: redis
     name: quizzie-redis
-    plan: starter            # 25 MB — more than enough for Celery queue + cache
-    maxmemoryPolicy: allkeys-lru
+    plan: starter            # 25 MB — note: each queued webcam frame is ~100+ KB (base64), so a
+                             # short worker backlog can fill this; see docs/HLD.md section 5.
+    # volatile-lru: never evict broker queues (no TTL) — only cache/lock/window keys.
+    maxmemoryPolicy: volatile-lru
 
 databases:
   # ── PostgreSQL ───────────────────────────────────────────────────────────

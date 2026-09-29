@@ -18,4 +18,7 @@ EXPOSE 8000
 
 # Workers configurable via env — default 4 for prod, override per host
 # Formula: (2 x CPU cores) + 1
-CMD uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${WORKERS:-4}
+# --proxy-headers: take the client IP from nginx's X-Forwarded-For (per-IP rate
+# limits were otherwise keyed on nginx's own IP, i.e. global). Uvicorn only
+# trusts FORWARDED_ALLOW_IPS (env; default 127.0.0.1) — see docker-compose.yml.
+CMD uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${WORKERS:-4} --proxy-headers
