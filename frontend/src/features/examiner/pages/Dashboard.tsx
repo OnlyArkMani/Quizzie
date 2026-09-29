@@ -81,7 +81,7 @@ const ExaminerDashboard = () => {
                 <PlusCircle className="w-5 h-5" />
                 Create Exam
               </button>
-              <button onClick={logout} className="btn-secondary">
+              <button onClick={() => logout()} className="btn-secondary">
                 Logout
               </button>
             </div>
@@ -207,4 +207,4 @@ const ExaminerDashboard = () => {
   );
 };
 
-export default ExaminerDashboard;
+export default ExaminerDashboard;

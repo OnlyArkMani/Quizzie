@@ -15,18 +15,25 @@ import { useExaminerStore } from '../../store/examinerStore';
 
 const questionSchema = z.object({
   question_text: z.string().min(10, 'Question must be at least 10 characters'),
-  question_type: z.enum(['single', 'multiple']),
+  question_type: z.enum(['single', 'multiple', 'coding', 'subjective']),
   marks: z.number().min(1, 'Minimum 1 mark'),
   topic: z.string().optional(),
+  // Optional here — option requirements for MCQs are enforced in onSubmit so
+  // coding/subjective questions (which have no options) validate cleanly.
   options: z
     .array(
       z.object({
-        option_text: z.string().min(1, 'Option cannot be empty'),
+        option_text: z.string(),
         is_correct: z.boolean(),
       })
     )
-    .min(2, 'At least 2 options required'),
+    .optional(),
+  // Coding/subjective only
+  reference_answer: z.string().optional(),
+  language: z.string().optional(),
 });
+
+const MANUAL_TYPES = ['coding', 'subjective'];
 
 type QuestionFormData = z.infer<typeof questionSchema>;
 
@@ -54,7 +61,9 @@ const Step2Questions = () => {
     },
   });
 
-  const options = watch('options');
+  const options = watch('options') || [];
+  const questionType = watch('question_type');
+  const isManual = MANUAL_TYPES.includes(questionType);
 
   const addOption = () => {
     setValue('options', [...options, { option_text: '', is_correct: false }]);
@@ -87,14 +96,21 @@ const Step2Questions = () => {
   };
 
   const onSubmit = (data: QuestionFormData) => {
-    // Validate at least one correct answer
-    const hasCorrect = data.options.some((opt) => opt.is_correct);
-    if (!hasCorrect) {
-      alert('Please mark at least one correct answer');
-      return;
+    if (MANUAL_TYPES.includes(data.question_type)) {
+      // Coding / subjective: no options, manual grading. Drop any option data.
+      addQuestion({ ...data, options: [] });
+    } else {
+      const opts = (data.options || []).filter((o) => o.option_text.trim() !== '');
+      if (opts.length < 2) {
+        alert('Please provide at least 2 options');
+        return;
+      }
+      if (!opts.some((opt) => opt.is_correct)) {
+        alert('Please mark at least one correct answer');
+        return;
+      }
+      addQuestion({ ...data, options: opts });
     }
-
-    addQuestion(data);
     reset();
     setShowQuestionForm(false);
   };
@@ -161,6 +177,16 @@ const Step2Questions = () => {
                           Multiple Correct
                         </span>
                       )}
+                      {question.question_type === 'coding' && (
+                        <span className="text-xs px-2 py-1 rounded-full bg-sky-100 text-sky-700">
+                          Coding{question.language ? ` · ${question.language}` : ''}
+                        </span>
+                      )}
+                      {question.question_type === 'subjective' && (
+                        <span className="text-xs px-2 py-1 rounded-full bg-teal-100 text-teal-700">
+                          Subjective
+                        </span>
+                      )}
                       {question.topic && (
                         <span className="text-xs px-2 py-1 rounded-full bg-purple-100 text-purple-700">
                           {question.topic}
@@ -168,20 +194,27 @@ const Step2Questions = () => {
                       )}
                     </div>
                     <p className="text-slate-900 font-medium mb-3">{question.question_text}</p>
-                    <div className="grid grid-cols-2 gap-2">
-                      {question.options.map((option, optIdx) => (
-                        <div
-                          key={optIdx}
-                          className={`text-sm p-2 rounded ${
-                            option.is_correct
-                              ? 'bg-emerald-50 text-emerald-900 border border-emerald-200'
-                              : 'bg-slate-50 text-slate-700'
-                          }`}
-                        >
-                          {String.fromCharCode(65 + optIdx)}. {option.option_text}
-                        </div>
-                      ))}
-                    </div>
+                    {MANUAL_TYPES.includes(question.question_type) ? (
+                      <div className="text-sm text-slate-500 italic bg-slate-50 rounded p-2">
+                        Manually graded — students type a free-form answer.
+                        {question.reference_answer ? ' Rubric provided.' : ''}
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-2 gap-2">
+                        {(question.options || []).map((option, optIdx) => (
+                          <div
+                            key={optIdx}
+                            className={`text-sm p-2 rounded ${
+                              option.is_correct
+                                ? 'bg-emerald-50 text-emerald-900 border border-emerald-200'
+                                : 'bg-slate-50 text-slate-700'
+                            }`}
+                          >
+                            {String.fromCharCode(65 + optIdx)}. {option.option_text}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                   <button
                     onClick={() => removeQuestion(index)}
@@ -271,6 +304,8 @@ const Step2Questions = () => {
                       <select {...register('question_type')} className="input-field">
                         <option value="single">Single Correct</option>
                         <option value="multiple">Multiple Correct</option>
+                        <option value="coding">Coding (manual grade)</option>
+                        <option value="subjective">Subjective (manual grade)</option>
                       </select>
                     </div>
 
@@ -299,7 +334,42 @@ const Step2Questions = () => {
                     </div>
                   </div>
 
-                  {/* Options */}
+                  {/* Coding / subjective: reference answer + language */}
+                  {isManual && (
+                    <div className="space-y-4">
+                      {questionType === 'coding' && (
+                        <div>
+                          <label className="block text-sm font-medium text-slate-700 mb-2">
+                            Language (Optional)
+                          </label>
+                          <input
+                            {...register('language')}
+                            type="text"
+                            className="input-field"
+                            placeholder="e.g., python, javascript, c++"
+                          />
+                        </div>
+                      )}
+                      <div>
+                        <label className="block text-sm font-medium text-slate-700 mb-2">
+                          Model Answer / Grading Rubric (Optional)
+                        </label>
+                        <textarea
+                          {...register('reference_answer')}
+                          rows={4}
+                          className="input-field resize-none font-mono text-sm"
+                          placeholder="Shown to you while grading. Describe the expected answer or key points."
+                        />
+                      </div>
+                      <p className="text-xs text-slate-500">
+                        This question is graded manually after the exam. Students type a free-form
+                        {questionType === 'coding' ? ' code' : ' text'} answer.
+                      </p>
+                    </div>
+                  )}
+
+                  {/* Options (MCQ only) */}
+                  {!isManual && (
                   <div>
                     <div className="flex items-center justify-between mb-3">
                       <label className="text-sm font-medium text-slate-700">Options *</label>
@@ -358,6 +428,7 @@ const Step2Questions = () => {
                       Click the circle to mark correct answer(s)
                     </p>
                   </div>
+                  )}
 
                   {/* Submit */}
                   <div className="flex gap-3 pt-4">
