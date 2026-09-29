@@ -3,8 +3,10 @@ Enhanced Proctoring API Endpoints
 Handles real-time monitoring, health tracking, and configuration
 """
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status, Query
+from fastapi.concurrency import run_in_threadpool
+from sqlalchemy import func
 from sqlalchemy.orm import Session
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Set
 from datetime import datetime, timezone
 from pydantic import BaseModel, Field
 from uuid import UUID
@@ -12,7 +14,7 @@ import asyncio
 import logging
 from collections import defaultdict
 
-from app.core.database import get_db, SessionLocal
+from app.core.database import get_db, run_db, SessionLocal
 from app.api.deps import get_current_user
 from app.core.security import decode_access_token
 from app.models.user import User
@@ -22,6 +24,8 @@ from app.models.exam import Exam
 # Import with alias to avoid name conflict with the Pydantic schema below
 from app.models.proctoring_settings import ProctoringSettings as ProctoringSettingsModel
 from app.ai_monitor import scoring, health as health_mod
+from app.core import events, rate_limit
+from app.core.cache import cache
 
 logger = logging.getLogger(__name__)
 
@@ -30,42 +34,62 @@ router = APIRouter()
 
 # WebSocket connection manager for real-time updates
 class ConnectionManager:
-    """Manages WebSocket connections for real-time proctoring"""
+    """
+    Sockets held by THIS process, keyed by attempt id. Several sockets can
+    watch one attempt (the student plus an examiner) — the old
+    one-socket-per-attempt dict let an examiner connection silently replace
+    the student's.
+
+    Messages arrive via ``dispatch`` from the Redis subscriber (see
+    app.core.events), so an update produced by a Celery worker or another
+    replica still reaches a socket connected here.
+    """
 
     def __init__(self):
-        self.active_connections: Dict[str, WebSocket] = {}
-        self.attempt_health: Dict[str, int] = {}
+        self._sockets: Dict[str, Set[WebSocket]] = defaultdict(set)
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop = loop
 
     async def connect(self, attempt_id: str, websocket: WebSocket):
         await websocket.accept()
-        self.active_connections[attempt_id] = websocket
-        self.attempt_health[attempt_id] = 100  # Initial health
+        self._sockets[attempt_id].add(websocket)
 
-    def disconnect(self, attempt_id: str):
-        if attempt_id in self.active_connections:
-            del self.active_connections[attempt_id]
-        if attempt_id in self.attempt_health:
-            del self.attempt_health[attempt_id]
+    def disconnect(self, attempt_id: str, websocket: Optional[WebSocket] = None):
+        socks = self._sockets.get(attempt_id)
+        if not socks:
+            return
+        if websocket is None:
+            socks.clear()
+        else:
+            socks.discard(websocket)
+        if not socks:
+            self._sockets.pop(attempt_id, None)
 
-    async def send_health_update(self, attempt_id: str, health_data: dict):
-        if attempt_id in self.active_connections:
+    def local_connections(self, attempt_id: str) -> int:
+        return len(self._sockets.get(attempt_id, ()))
+
+    async def dispatch(self, message: dict) -> int:
+        """Deliver an event to the local sockets for its attempt. Returns #sent."""
+        attempt_id = message.get("attempt_id")
+        sent = 0
+        for ws in list(self._sockets.get(attempt_id, ())):
             try:
-                await self.active_connections[attempt_id].send_json({
-                    "type": "health_update",
-                    "data": health_data
-                })
+                await ws.send_json({"type": "health_update", "data": message.get("data")})
+                if message.get("alert"):
+                    await ws.send_json({"type": "violation_alert", "data": message["alert"]})
+                if message.get("auto_submitted"):
+                    await ws.send_json({"type": "auto_submitted", "data": {"attempt_id": attempt_id}})
+                sent += 1
             except Exception:
-                self.disconnect(attempt_id)
+                self.disconnect(attempt_id, ws)
+        return sent
 
-    async def send_violation_alert(self, attempt_id: str, violation: dict):
-        if attempt_id in self.active_connections:
-            try:
-                await self.active_connections[attempt_id].send_json({
-                    "type": "violation_alert",
-                    "data": violation
-                })
-            except Exception:
-                self.disconnect(attempt_id)
+    def dispatch_threadsafe(self, message: dict) -> None:
+        """In-process fallback when Redis is down (called from worker threads)."""
+        if self._loop is not None and self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(self.dispatch(message), self._loop)
 
 
 manager = ConnectionManager()
@@ -119,7 +143,7 @@ class ProctoringEvent(BaseModel):
 # ─── API Endpoints ────────────────────────────────────────────────────────────
 
 @router.post("/exam/{exam_id}/proctoring-settings")
-async def update_proctoring_settings(
+def update_proctoring_settings(
     exam_id: UUID,
     settings: ExamProctoringConfig,
     db: Session = Depends(get_db),
@@ -175,6 +199,14 @@ async def get_proctoring_settings(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    return await run_db(db, _get_proctoring_settings_blocking, exam_id, db, current_user)
+
+
+def _get_proctoring_settings_blocking(
+    exam_id: UUID,
+    db: Session,
+    current_user: User
+):
     """Get proctoring settings for an exam"""
     exam = db.query(Exam).filter(Exam.id == exam_id).first()
     if not exam:
@@ -209,6 +241,14 @@ async def report_violation(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    return await run_db(db, _report_violation_blocking, event, db, current_user)
+
+
+def _report_violation_blocking(
+    event: ProctoringEvent,
+    db: Session,
+    current_user: User
+):
     """
     Report a client-detected proctoring violation (tab switch, fullscreen
     exit, copy/paste, etc.) and update health.
@@ -230,21 +270,14 @@ async def report_violation(
     ps = db.query(ProctoringSettingsModel).filter(
         ProctoringSettingsModel.exam_id == attempt.exam_id
     ).first()
-    warning_threshold = ps.health_warning_threshold if ps else 40
 
+    # Persists logs, applies the penalty atomically, and publishes the new
+    # health to every API process (Redis pub/sub) — including the one holding
+    # this student's WebSocket, which may not be this one.
     record = health_mod.record_violations(
         db, attempt, event.flags, ps=ps, event_type=event.event_type
     )
     health_status = record["health"]
-
-    await manager.send_health_update(str(event.attempt_id), health_status)
-
-    if health_status['percentage'] <= warning_threshold:
-        await manager.send_violation_alert(str(event.attempt_id), {
-            'message': f"⚠️ Health is at {health_status['percentage']:.0f}%",
-            'severity': 'high',
-            'timestamp': datetime.now(timezone.utc).isoformat()
-        })
 
     return {
         "health": health_status,
@@ -258,6 +291,32 @@ async def get_attempt_health(
     attempt_id: UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
+):
+    """
+    Students poll this as a backstop to the WebSocket. Served from the Redis
+    health snapshot (owner-checked) with zero DB work; falls back to Postgres
+    on a miss, for examiners, or when Redis is down.
+    """
+    raw = await cache.get(events.snapshot_key(str(attempt_id)))
+    if raw and raw.get("owner") == str(current_user.id):
+        return raw["data"]
+    health = await run_db(db, _get_attempt_health_blocking, attempt_id, db, current_user)
+    if current_user.role == "student" and cache.raw_client is not None:
+        try:   # fill-on-miss must never overwrite a newer published snapshot: NX
+            await cache.raw_client.set(
+                events.snapshot_key(str(attempt_id)),
+                events._snapshot_payload(current_user.id, health),
+                ex=events.SNAPSHOT_TTL_SECONDS, nx=True,
+            )
+        except Exception:
+            pass
+    return health
+
+
+def _get_attempt_health_blocking(
+    attempt_id: UUID,
+    db: Session,
+    current_user: User
 ):
     """Get current health status for an attempt"""
     attempt = db.query(ExamAttempt).filter(ExamAttempt.id == attempt_id).first()
@@ -278,7 +337,7 @@ async def get_attempt_health(
 
 
 @router.get("/attempt/{attempt_id}/violations")
-async def get_attempt_violations(
+def get_attempt_violations(
     attempt_id: UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -349,7 +408,7 @@ def _authorize_ws_attempt(token: Optional[str], attempt_id: str):
     db = SessionLocal()
     try:
         user = db.query(User).filter(User.email == email).first()
-        if not user:
+        if not user or (payload.get("tv", 0) or 0) != (user.token_version or 0):
             return None
         attempt = db.query(ExamAttempt).filter(ExamAttempt.id == attempt_id).first()
         if not attempt:
@@ -385,7 +444,9 @@ async def proctoring_websocket(
     attempt's owner (student), the exam's examiner, or an admin. Previously this
     endpoint accepted ANY connection for ANY attempt id with no auth at all.
     """
-    attempt = _authorize_ws_attempt(token, attempt_id)
+    # Auth + the initial snapshot use the sync ORM, so they run in the
+    # threadpool; the event loop only ever awaits socket I/O.
+    attempt = await run_in_threadpool(_authorize_ws_attempt, token, attempt_id)
     if attempt is None:
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
@@ -399,20 +460,11 @@ async def proctoring_websocket(
             "attempt_id": attempt_id
         })
 
-        # Send the persisted health immediately (no full-log replay).
-        db = SessionLocal()
-        try:
-            attempt = db.query(ExamAttempt).filter(ExamAttempt.id == attempt_id).first()
-            if attempt:
-                ps = db.query(ProctoringSettingsModel).filter(
-                    ProctoringSettingsModel.exam_id == attempt.exam_id
-                ).first()
-                await websocket.send_json({
-                    "type": "health_update",
-                    "data": health_mod.current_health_status(db, attempt, ps=ps)
-                })
-        finally:
-            db.close()
+        # Snapshot on (re)connect: pub/sub is at-most-once, so anything missed
+        # while disconnected is healed by sending the persisted value now.
+        snapshot = await run_in_threadpool(_health_snapshot, attempt_id)
+        if snapshot is not None:
+            await websocket.send_json({"type": "health_update", "data": snapshot})
 
         while True:
             data = await websocket.receive_json()
@@ -421,17 +473,39 @@ async def proctoring_websocket(
                 await websocket.send_json({'type': 'pong'})
 
     except WebSocketDisconnect:
-        manager.disconnect(attempt_id)
+        manager.disconnect(attempt_id, websocket)
     except Exception as e:
         logger.warning("WebSocket error for attempt %s: %s", attempt_id, e)
-        manager.disconnect(attempt_id)
+        manager.disconnect(attempt_id, websocket)
+
+
+def _health_snapshot(attempt_id: str) -> Optional[dict]:
+    db = SessionLocal()
+    try:
+        attempt = db.query(ExamAttempt).filter(ExamAttempt.id == attempt_id).first()
+        if not attempt:
+            return None
+        ps = db.query(ProctoringSettingsModel).filter(
+            ProctoringSettingsModel.exam_id == attempt.exam_id
+        ).first()
+        return health_mod.current_health_status(db, attempt, ps=ps)
+    finally:
+        db.close()
 
 
 # ── Health Recovery Endpoint ───────────────────────────────────────────────────
 
 class RecoverRequest(BaseModel):
     attempt_id: UUID
+    # Kept for API compatibility; the server decides the real amount.
     amount: int = Field(3, ge=1, le=20)
+
+
+# Recovery policy — enforced HERE, not trusted from the client. Previously any
+# client could call /recover in a loop and hold itself at full health.
+RECOVERY_CLEAN_SECONDS = 60     # must have no violation for this long
+RECOVERY_INTERVAL_SECONDS = 60  # at most one recovery per interval per attempt
+RECOVERY_MAX_AMOUNT = 3
 
 
 @router.post("/recover")
@@ -440,14 +514,20 @@ async def recover_health(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Restore a small amount of health for clean behaviour.
-    Called by the frontend after 60 s with no violations.
-    Only recovers up to the initial max — cannot overheal.
+    return await run_db(db, _recover_health_blocking, req, db, current_user)
 
-    Now persists to the health column. Previously this recomputed health from
-    the log, added the amount, and returned it WITHOUT saving — so the recovered
-    HP vanished on the next request, making the whole feature a no-op.
+
+def _recover_health_blocking(
+    req: RecoverRequest,
+    db: Session,
+    current_user: User
+):
+    """
+    Restore a small amount of health after a clean period. The frontend may
+    call this whenever it likes; the server only grants recovery when the
+    attempt really has been violation-free for RECOVERY_CLEAN_SECONDS and no
+    recovery was granted in the last RECOVERY_INTERVAL_SECONDS (a distributed
+    limiter, so hopping between API replicas doesn't help either).
     """
     attempt = db.query(ExamAttempt).filter(
         ExamAttempt.id == req.attempt_id,
@@ -461,21 +541,25 @@ async def recover_health(
         ProctoringSettingsModel.exam_id == attempt.exam_id
     ).first()
 
-    record = health_mod.recover(db, attempt, req.amount, ps=ps)
+    since = health_mod.seconds_since_last_violation(db, attempt.id)
+    clean = since is None or since >= RECOVERY_CLEAN_SECONDS
+    if not clean or not rate_limit.allow_sync(
+        f"recover:{attempt.id}", 1, RECOVERY_INTERVAL_SECONDS
+    ):
+        return {
+            "recovered": 0,
+            "eligible": False,
+            "health": health_mod.current_health_status(db, attempt, ps=ps),
+        }
 
-    # Push updated health to WebSocket if connected
-    await manager.send_health_update(str(req.attempt_id), record["health"])
-
-    return {
-        "recovered": record["recovered"],
-        "health": record["health"]
-    }
+    record = health_mod.recover(db, attempt, min(req.amount, RECOVERY_MAX_AMOUNT), ps=ps)
+    return {"recovered": record["recovered"], "eligible": True, "health": record["health"]}
 
 
 # ── Suspicion Score ───────────────────────────────────────────────────
 
 @router.get("/attempt/{attempt_id}/suspicion-score")
-async def get_suspicion_score(
+def get_suspicion_score(
     attempt_id: UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -550,7 +634,7 @@ async def get_suspicion_score(
 # ── Live Proctoring Feed (examiner view) ───────────────────────────────
 
 @router.get("/exam/{exam_id}/live-feed")
-async def get_live_feed(
+def get_live_feed(
     exam_id: UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
@@ -569,10 +653,39 @@ async def get_live_feed(
         raise HTTPException(status_code=403, detail="Access denied")
 
     from app.models.user import User as UserModel
-    active_attempts = db.query(ExamAttempt).filter(
-        ExamAttempt.exam_id == exam_id,
-        ExamAttempt.submitted_at == None  # noqa: E711 — still in progress
-    ).all()
+
+    # Query 1: active attempts + student identity in one JOIN.
+    rows = (
+        db.query(ExamAttempt, UserModel.full_name, UserModel.email)
+        .join(UserModel, UserModel.id == ExamAttempt.student_id)
+        .filter(
+            ExamAttempt.exam_id == exam_id,
+            ExamAttempt.status == AttemptStatus.IN_PROGRESS,
+        )
+        .all()
+    )
+    ids = [a.id for a, _, _ in rows]
+
+    # Query 2: violation counts per attempt (GROUP BY, not N COUNT queries).
+    counts = dict(
+        db.query(CheatLog.attempt_id, func.count(CheatLog.id))
+        .filter(CheatLog.attempt_id.in_(ids))
+        .group_by(CheatLog.attempt_id)
+        .all()
+    ) if ids else {}
+
+    # Query 3: latest flag per attempt with DISTINCT ON, served by the
+    # (attempt_id, timestamp DESC) index.
+    latest = {
+        log.attempt_id: log
+        for log in (
+            db.query(CheatLog)
+            .filter(CheatLog.attempt_id.in_(ids))
+            .distinct(CheatLog.attempt_id)
+            .order_by(CheatLog.attempt_id, CheatLog.timestamp.desc())
+            .all()
+        )
+    } if ids else {}
 
     ps = db.query(ProctoringSettingsModel).filter(
         ProctoringSettingsModel.exam_id == exam_id
@@ -580,40 +693,29 @@ async def get_live_feed(
     maximum = health_mod.initial_health(ps)
 
     feed = []
-    dirty = False
-    for attempt in active_attempts:
-        student = db.query(UserModel).filter(UserModel.id == attempt.student_id).first()
-        violations = db.query(CheatLog).filter(CheatLog.attempt_id == attempt.id).all()
-
-        # Read the persisted health column (lazy-init older NULL rows) instead
-        # of replaying every student's full cheat log on each poll.
-        current = health_mod.ensure_health(attempt, ps)
-        if db.is_modified(attempt):
-            dirty = True
-
+    for attempt, full_name, email in rows:
+        n = counts.get(attempt.id, 0)
+        current = attempt.current_health if attempt.current_health is not None else maximum
+        log = latest.get(attempt.id)
         last_flag = None
-        if violations:
-            latest = max(violations, key=lambda v: v.timestamp)
+        if log is not None:
             last_flag = {
-                "type": latest.flag_type,
-                "severity": scoring.normalize_severity(latest.severity),
-                "timestamp": latest.timestamp.isoformat()
+                "type": log.flag_type,
+                "severity": scoring.normalize_severity(log.severity),
+                "timestamp": log.timestamp.isoformat(),
             }
-
-        health = health_mod.health_status(current, maximum, len(violations))
+        health = health_mod.health_status(current, maximum, n)
         feed.append({
             "attempt_id": str(attempt.id),
-            "student_name": student.full_name if student else "Unknown",
-            "student_email": student.email if student else "",
+            "student_name": full_name or "Unknown",
+            "student_email": email or "",
             "health_percentage": health["percentage"],
             "health_status": health["status"],
-            "violation_count": len(violations),
+            "violation_count": n,
             "last_flag": last_flag,
             "started_at": attempt.started_at.isoformat() if attempt.started_at else None,
+            "deadline": attempt.deadline.isoformat() if attempt.deadline else None,
         })
-
-    if dirty:
-        db.commit()
 
     feed.sort(key=lambda x: x["violation_count"], reverse=True)
 

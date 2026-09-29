@@ -19,9 +19,11 @@ import logging
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.ai_monitor import scoring
+from app.core import events
 from app.models.attempt import ExamAttempt, AttemptStatus
 from app.models.cheat_log import CheatLog, CheatSeverity
 
@@ -96,15 +98,30 @@ def record_violations(
     """
     The single write path for proctoring violations.
 
-    Persists one CheatLog per flag, decrements the persisted health column by
-    the shared health penalty, bumps the violation counter, and auto-submits
-    when health hits zero (if enabled). Returns a summary dict including the
-    fresh health status so callers can push it over the WebSocket.
-    """
-    maximum = initial_health(ps)
-    current = ensure_health(attempt, ps)
+    Persists one CheatLog per flag and applies the summed penalty with ONE
+    atomic statement:
 
-    logged = 0
+        UPDATE exam_attempts
+        SET current_health = GREATEST(0, COALESCE(current_health, :max) - :penalty),
+            cheating_flags = COALESCE(cheating_flags, 0) + :n
+        WHERE id = :id
+        RETURNING current_health
+
+    Why not read → subtract in Python → write? Because the frame task and the
+    audio task for the same attempt run concurrently in different Celery
+    workers. Both would read health=100, both would write back 100-penalty, and
+    one penalty would silently vanish (a "lost update"). Doing the arithmetic
+    inside the UPDATE makes Postgres serialise the two writers on the row lock;
+    the second one re-reads the committed value before applying its penalty.
+
+    Auto-submits (compare-and-set, via AttemptService) when health hits zero.
+    """
+    from app.services.attempt_service import AttemptService
+
+    maximum = initial_health(ps)
+
+    logs = []
+    penalty = 0
     for raw in flags or []:
         flag = _coerce_flag(raw, default_severity)
         canonical = scoring.canonical_flag(flag["type"])
@@ -120,52 +137,102 @@ def record_violations(
         if flag["metadata"]:
             meta.update(flag["metadata"])
 
-        db.add(CheatLog(
+        logs.append(CheatLog(
             attempt_id=attempt.id,
             flag_type=canonical,
             severity=severity_enum,
             timestamp=datetime.now(timezone.utc),
             meta_data=meta,
         ))
+        penalty += scoring.health_penalty(canonical, flag["severity"])
 
-        current = max(0, current - scoring.health_penalty(canonical, flag["severity"]))
-        logged += 1
-
-    attempt.current_health = current
-    attempt.cheating_flags = (attempt.cheating_flags or 0) + logged
+    db.add_all(logs)
+    current, flag_count = db.execute(
+        update(ExamAttempt)
+        .where(ExamAttempt.id == attempt.id)
+        .values(
+            current_health=func.greatest(
+                0, func.coalesce(ExamAttempt.current_health, maximum) - penalty
+            ),
+            cheating_flags=func.coalesce(ExamAttempt.cheating_flags, 0) + len(logs),
+        )
+        .returning(ExamAttempt.current_health, ExamAttempt.cheating_flags)
+        .execution_options(synchronize_session=False)
+    ).one()
+    db.expire(attempt, ["current_health", "cheating_flags"])
 
     auto_submitted = False
     auto_submit_enabled = getattr(ps, "auto_submit_on_zero_health", True)
     if current <= 0 and auto_submit_enabled:
-        status_val = attempt.status.value if hasattr(attempt.status, "value") else attempt.status
-        if status_val == AttemptStatus.IN_PROGRESS.value:
-            attempt.status = AttemptStatus.SUBMITTED
-            attempt.submitted_at = datetime.now(timezone.utc)
-            auto_submitted = True
+        auto_submitted = AttemptService(db).close_for_health(attempt)
 
     if commit:
         db.commit()
+        if auto_submitted:
+            from app.services import evaluation_dispatch
+            evaluation_dispatch.dispatch(attempt.id)
+
+    # violations_count comes from the counter maintained in the same UPDATE —
+    # it used to be a COUNT(*) over cheat_logs on every violation and every
+    # health read, i.e. O(violations so far) on the hottest proctoring path.
+    status = health_status(current, maximum, flag_count)
+    if commit and logs:
+        threshold = getattr(ps, "health_warning_threshold", None) or 40
+        alert = None
+        if status["percentage"] <= threshold:
+            alert = {
+                "message": f"Health is at {status['percentage']:.0f}%",
+                "severity": "high",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        events.publish_health(str(attempt.id), status, auto_submitted=auto_submitted,
+                              alert=alert, owner_id=attempt.student_id)
 
     return {
-        "logged": logged,
+        "logged": len(logs),
         "auto_submitted": auto_submitted,
-        "health": health_status(current, maximum, _violation_count(db, attempt.id)),
+        "health": status,
     }
 
 
 def recover(db: Session, attempt: ExamAttempt, amount: int, ps=None, commit: bool = True) -> Dict:
-    """Restore up to ``amount`` HP (capped at max). Persists, unlike before."""
+    """
+    Restore up to ``amount`` HP, capped at max, atomically (same lost-update
+    reasoning as record_violations). Only in-progress attempts can recover.
+    """
     maximum = initial_health(ps)
-    current = ensure_health(attempt, ps)
-    new_health = min(maximum, current + max(0, amount))
-    recovered = new_health - current
-    attempt.current_health = new_health
+    before, flag_count = db.execute(
+        select(ExamAttempt.current_health, ExamAttempt.cheating_flags).where(ExamAttempt.id == attempt.id)
+    ).one()
+    before = maximum if before is None else before
+    row = db.execute(
+        update(ExamAttempt)
+        .where(ExamAttempt.id == attempt.id, ExamAttempt.status == AttemptStatus.IN_PROGRESS)
+        .values(current_health=func.least(
+            maximum, func.coalesce(ExamAttempt.current_health, maximum) + max(0, amount)
+        ))
+        .returning(ExamAttempt.current_health)
+        .execution_options(synchronize_session=False)
+    ).first()
+    new_health = row[0] if row else before
+    db.expire(attempt, ["current_health"])
     if commit:
         db.commit()
-    return {
-        "recovered": recovered,
-        "health": health_status(new_health, maximum, _violation_count(db, attempt.id)),
-    }
+    status = health_status(new_health, maximum, flag_count or 0)
+    if commit and row:
+        events.publish_health(str(attempt.id), status, owner_id=attempt.student_id)
+    return {"recovered": max(0, new_health - before), "health": status}
+
+
+def seconds_since_last_violation(db: Session, attempt_id) -> Optional[float]:
+    last = db.execute(
+        select(func.max(CheatLog.timestamp)).where(CheatLog.attempt_id == attempt_id)
+    ).scalar_one_or_none()
+    if last is None:
+        return None
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - last).total_seconds()
 
 
 def current_health_status(db: Session, attempt: ExamAttempt, ps=None) -> Dict:
@@ -175,7 +242,7 @@ def current_health_status(db: Session, attempt: ExamAttempt, ps=None) -> Dict:
     # ensure_health may have set the column; persist that one-time init.
     if db.is_modified(attempt):
         db.commit()
-    return health_status(current, maximum, _violation_count(db, attempt.id))
+    return health_status(current, maximum, attempt.cheating_flags or 0)
 
 
 def recompute_from_logs(db: Session, attempt: ExamAttempt, ps=None) -> int:
@@ -192,4 +259,5 @@ def recompute_from_logs(db: Session, attempt: ExamAttempt, ps=None) -> int:
 
 
 def _violation_count(db: Session, attempt_id) -> int:
+    """Audit/repair only (O(n)). Hot paths read ExamAttempt.cheating_flags."""
     return db.query(CheatLog).filter(CheatLog.attempt_id == attempt_id).count()

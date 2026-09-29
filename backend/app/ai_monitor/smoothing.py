@@ -3,22 +3,22 @@ Temporal smoothing for proctoring flags.
 
 Visual detections (gaze off-screen, looking away/down, mouth movement) are
 noisy frame to frame — a single glance at the keyboard or a yawn used to flag
-instantly. This module requires a flag type to persist across a few consecutive
-analyses within a short window before it is "confirmed" and allowed to penalise
-health, sharply cutting false positives.
+instantly. A flag type must be sighted ``threshold`` times within a short
+window before it is "confirmed" and allowed to penalise health, sharply
+cutting false positives. Hard violations (multiple faces) use threshold 1.
 
-State is kept per worker process (a simple in-memory dict). For a given attempt
-frames almost always route to one worker, so this is consistent in practice;
-worst case is a one-frame delay in confirming a violation. Hard violations
-(multiple faces, no face) use a threshold of 1 so they fire immediately.
+State lives in Redis (sorted-set sliding window, see app.core.rate_limit), so
+it is shared by every Celery worker process. It used to be a per-process dict:
+with ``--concurrency=4`` consecutive frames of one attempt land on different
+processes, each seeing only ~1/4 of the sightings, so a real sustained
+violation could go unconfirmed. Falls back to in-process state without Redis.
 """
 from __future__ import annotations
 
-import threading
-import time
-from typing import Dict, List
+from typing import List
 
 from app.ai_monitor import scoring
+from app.core import rate_limit, redis_client
 
 # How many consecutive sightings (within the window) confirm a flag.
 # looking_down is deliberately high so only a *prolonged* head-down (not a
@@ -33,11 +33,6 @@ _THRESHOLDS = {
 }
 _DEFAULT_THRESHOLD = 1          # multiple_faces, tab_switch, etc. fire at once
 _WINDOW_SECONDS = 12.0          # sightings older than this are forgotten
-_MAX_ATTEMPTS_TRACKED = 5000    # crude cap so the dict can't grow unbounded
-
-_state: Dict[str, Dict[str, list]] = {}
-_lock = threading.Lock()
-
 
 def _threshold(flag_type: str) -> int:
     return _THRESHOLDS.get(scoring.canonical_flag(flag_type), _DEFAULT_THRESHOLD)
@@ -48,24 +43,12 @@ def confirm(attempt_id: str, flag_type: str, now: float | None = None) -> bool:
     Record one sighting of ``flag_type`` for ``attempt_id`` and return True when
     enough sightings have accumulated within the window (i.e. the flag is real).
     On confirmation the counter resets so penalties don't fire every frame.
+    (``now`` is accepted for backwards compatibility; the window uses Redis time.)
     """
-    now = now if now is not None else time.time()
     canonical = scoring.canonical_flag(flag_type)
-    threshold = _threshold(canonical)
-    if threshold <= 1:
-        return True
-
-    with _lock:
-        if len(_state) > _MAX_ATTEMPTS_TRACKED:
-            _state.clear()
-        per_attempt = _state.setdefault(attempt_id, {})
-        stamps = [t for t in per_attempt.get(canonical, []) if now - t <= _WINDOW_SECONDS]
-        stamps.append(now)
-        if len(stamps) >= threshold:
-            per_attempt[canonical] = []      # reset after confirming
-            return True
-        per_attempt[canonical] = stamps
-        return False
+    return rate_limit.hit_and_check_sync(
+        f"{attempt_id}:{canonical}", _threshold(canonical), _WINDOW_SECONDS
+    )
 
 
 def confirmed_flags(attempt_id: str, flags: List) -> List:
@@ -83,5 +66,10 @@ def confirmed_flags(attempt_id: str, flags: List) -> List:
 
 def reset(attempt_id: str) -> None:
     """Forget all smoothing state for an attempt (e.g. on submit)."""
-    with _lock:
-        _state.pop(attempt_id, None)
+    client = redis_client.get_sync_redis()
+    if client is not None:
+        try:
+            keys = [f"sm:{attempt_id}:{scoring.canonical_flag(t)}" for t in _THRESHOLDS]
+            client.delete(*keys)
+        except Exception:
+            redis_client.mark_failed()
