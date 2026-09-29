@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, DateTime, ForeignKey, Enum, JSON
+from sqlalchemy import Column, String, DateTime, ForeignKey, Enum, JSON, Index
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -22,5 +22,9 @@ class CheatLog(Base):
     # CHANGED: metadata -> meta_data (to avoid SQLAlchemy reserved word)
     meta_data = Column(JSON, nullable=True)
     
+    __table_args__ = (
+        Index("idx_cheat_logs_attempt_ts", "attempt_id", timestamp.desc()),
+    )
+
     # Relationships
-    attempt = relationship("ExamAttempt", back_populates="cheat_logs")
+    attempt = relationship("ExamAttempt", back_populates="cheat_logs")

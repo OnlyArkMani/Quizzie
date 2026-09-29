@@ -19,7 +19,7 @@ import csv
 import io
 import logging
 
-from app.core.database import get_db
+from app.core.database import get_db, run_db
 from app.core.cache import cache, key_leaderboard
 from app.core.config import settings
 from app.models.user import User
@@ -155,53 +155,56 @@ async def get_leaderboard(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(["examiner", "admin"]))
 ):
-    exam = db.query(Exam).filter(Exam.id == exam_id).first()
-    if not exam:
-        raise HTTPException(status_code=404, detail="Exam not found")
-    if str(exam.created_by) != str(current_user.id) and current_user.role.value != "admin":
-        raise HTTPException(status_code=403, detail="Not authorized")
+    limit = max(1, min(limit, 100))
 
-    ckey = key_leaderboard(str(exam_id))
-    try:
-        cached = await cache.get(ckey)
-        if cached:
-            return cached
-    except Exception:
-        pass  # Redis unavailable — proceed to DB query
+    def authorize():
+        exam = db.query(Exam).filter(Exam.id == exam_id).first()
+        if not exam:
+            raise HTTPException(status_code=404, detail="Exam not found")
+        if str(exam.created_by) != str(current_user.id) and current_user.role.value != "admin":
+            raise HTTPException(status_code=403, detail="Not authorized")
 
-    rows = db.query(
-        ExamAttempt.id,
-        ExamAttempt.score,
-        ExamAttempt.time_taken_seconds,
-        User.full_name,
-    ).join(User, User.id == ExamAttempt.student_id) \
-     .filter(ExamAttempt.exam_id == exam_id, ExamAttempt.status == _EVALUATED) \
-     .order_by(ExamAttempt.score.desc()) \
-     .limit(limit).all()
+    def load() -> List[dict]:
+        rows = db.query(
+            ExamAttempt.id,
+            ExamAttempt.score,
+            ExamAttempt.time_taken_seconds,
+            User.full_name,
+        ).join(User, User.id == ExamAttempt.student_id) \
+         .filter(ExamAttempt.exam_id == exam_id, ExamAttempt.status == _EVALUATED) \
+         .order_by(ExamAttempt.score.desc()) \
+         .limit(100).all()
+        return [
+            {
+                "rank": i + 1,
+                "student_name": row.full_name,
+                "score": round(float(row.score), 2),
+                "time_taken_seconds": row.time_taken_seconds or 0,
+            }
+            for i, row in enumerate(rows)
+        ]
 
-    leaderboard = [
-        {
-            "rank": i + 1,
-            "student_name": row.full_name,
-            "score": round(float(row.score), 2),
-            "time_taken_seconds": row.time_taken_seconds or 0,
-        }
-        for i, row in enumerate(rows)
-    ]
-
-    try:
-        await cache.set(ckey, leaderboard, ttl=settings.CACHE_TTL_LEADERBOARD)
-    except Exception:
-        pass  # Redis unavailable — skip caching
-
-    return leaderboard
+    await run_db(db, authorize)
+    # One cached top-100 per exam, sliced per request. (The old code cached
+    # whatever `limit` the first caller asked for and served it to everyone —
+    # a cached top-10 answered a request for the top-50.) Invalidated when an
+    # evaluation completes (EvaluationService), not merely on submit.
+    top = await cache.get_or_compute(
+        key_leaderboard(str(exam_id)), settings.CACHE_TTL_LEADERBOARD,
+        lambda: run_db(db, load),
+    )
+    return top[:limit]
 
 
 @router.get("/student/me/stats", response_model=dict)
-def get_student_stats(
+async def get_student_stats(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(["student"]))
 ):
+    return await run_db(db, _student_stats_blocking, db, current_user)
+
+
+def _student_stats_blocking(db: Session, current_user: User) -> dict:
     stats = db.query(
         func.count(ExamAttempt.id).label("taken"),
         func.avg(ExamAttempt.score).label("avg"),

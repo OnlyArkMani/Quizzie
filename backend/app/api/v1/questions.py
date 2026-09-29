@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List
 from uuid import UUID
+from app.core.cache import invalidate_sync, key_exam_questions
 from app.core.database import get_db
 from app.models.user import User
 from app.models.exam import Exam
@@ -88,38 +89,15 @@ def add_question(
 
     db.commit()
     db.refresh(new_question)
+    # A cached question list would otherwise hide the new question for a TTL.
+    invalidate_sync(key_exam_questions(str(exam_id)))
 
     return new_question
 
-@router.get("/{exam_id}/questions", response_model=List[QuestionSchema])
-def list_questions(
-    exam_id: UUID,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """
-    List all questions for an exam
-    """
-    exam = db.query(Exam).filter(Exam.id == exam_id).first()
-    
-    if not exam:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Exam not found"
-        )
-    
-    # Check permissions
-    if current_user.role == "student" and exam.status != "live":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Exam is not available"
-        )
-    
-    questions = db.query(Question).filter(
-        Question.exam_id == exam_id
-    ).order_by(Question.display_order).all()
-    
-    return questions
+# NOTE: a GET /{exam_id}/questions route used to live here. It was never
+# reachable (exams.router registers the same path first) and it serialised
+# is_correct for students, so it was removed. See exams.get_exam_questions.
+
 
 @router.delete("/{exam_id}/questions/{question_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_question(
@@ -158,5 +136,5 @@ def delete_question(
     
     db.delete(question)
     db.commit()
-    
-    return None
+    invalidate_sync(key_exam_questions(str(exam_id)))
+    return None

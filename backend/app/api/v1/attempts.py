@@ -1,32 +1,36 @@
 """
-Attempts API — exam start, submit, results, auto-save.
+Attempts API — start/resume, durable auto-save, submit, results, grading.
+
+The routes are thin: the attempt lifecycle (and its concurrency rules) lives in
+``app.services.attempt_service.AttemptService``.
 
 Submit flow
 -----------
-1. Validate + persist responses synchronously (always fast, just SQL inserts).
-2. Try to dispatch Celery evaluation task (async, best-effort).
+1. AttemptService.submit: compare-and-set the status to SUBMITTED and upsert the
+   final answers in ONE transaction (exactly-once, even under concurrent calls).
+2. Try to dispatch the Celery evaluation task (async, best-effort, 5 s cap).
 3. If Celery/Redis is unavailable, evaluate synchronously in-process instead.
-   This guarantees the HTTP response always returns quickly regardless of
-   whether Redis is running — critical for the Windows dev environment where
-   Redis may not be installed.
 """
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
-from datetime import datetime, timedelta
-from typing import List
+from typing import List, Optional
 from uuid import UUID
-from pydantic import BaseModel
 import logging
 
-from app.core.database import get_db
+from app.core.database import get_db, run_db
 from app.core.cache import cache, key_leaderboard
 from app.models.user import User
 from app.models.exam import Exam
 from app.models.attempt import ExamAttempt, Response, AttemptStatus
 from app.models.question import Question
-from app.schemas.response import AttemptCreate, AttemptSubmit, Attempt as AttemptSchema, GradeRequest
+from app.schemas.response import (
+    AttemptCreate, AttemptSubmit, AutoSaveRequest, Attempt as AttemptSchema, GradeRequest,
+)
 from app.api.deps import get_current_user, require_role
 from app.services.evaluation_service import EvaluationService
+from app.services.attempt_service import AnswerIn, AttemptError, AttemptService
+from app.services import evaluation_dispatch
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +49,6 @@ evaluate_attempt_task = _celery_task
 router = APIRouter()
 
 
-class AutoSaveBody(BaseModel):
-    responses: List[dict]
-
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _try_celery(attempt_id: str) -> tuple[bool, dict | None]:
@@ -61,72 +61,124 @@ def _try_celery(attempt_id: str) -> tuple[bool, dict | None]:
     to synchronous evaluation instead of hanging the request.
     """
     import app.api.v1.attempts as _mod  # always read current binding for test patching
-    task_fn = _mod.evaluate_attempt_task
-    if task_fn is None:
-        return False, None
-    try:
-        # apply_async can block if the broker is slow to refuse.
-        # We set a short socket timeout in celery_app.py (3 s), but as an
-        # extra safety net we run the dispatch in a thread with a 5 s timeout.
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(
-                task_fn.apply_async,
-                args=[attempt_id],
-                kwargs={"queue": "evaluation"},
-            )
-            task = future.result(timeout=5)   # 5 s hard cap — never hangs the request
-        return True, {"task_id": task.id}
-    except Exception as e:
-        logger.warning(
-            "Celery unavailable (%s) — falling back to synchronous evaluation.", e
-        )
-        return False, None
+    task_id = evaluation_dispatch.enqueue(_mod.evaluate_attempt_task, attempt_id)
+    return (True, {"task_id": task_id}) if task_id else (False, None)
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
+#
+# Student hot-path routes are ``async def`` and do ALL their DB work inside one
+# ``run_db`` call (see app.core.database.run_db): blocking work never runs on
+# the event loop, and the transaction/connection is released before the worker
+# thread is. Low-traffic examiner routes stay plain ``def``.
+
+def _answers(items) -> List[AnswerIn]:
+    return [
+        AnswerIn(
+            question_id=r.question_id,
+            selected_option_ids=list(r.selected_option_ids or []),
+            answer_text=r.answer_text,
+            marked_for_review=r.marked_for_review,
+            client_seq=r.client_seq,
+        )
+        for r in items
+    ]
+
+
+def _raise_http(e: AttemptError):
+    raise HTTPException(status_code=e.status_code, detail=e.detail)
+
+
+def _service_call(db: Session, method: str, *args):
+    """Run an AttemptService method; map domain errors to HTTP (in the worker)."""
+    try:
+        return getattr(AttemptService(db), method)(*args)
+    except AttemptError as e:
+        _raise_http(e)
+
+
+def _attempt_dto(attempt: ExamAttempt) -> dict:
+    return AttemptSchema.model_validate(attempt).model_dump()
+
 
 @router.post("/start", response_model=AttemptSchema, status_code=status.HTTP_201_CREATED)
-def start_exam(
+async def start_exam(
     attempt_data: AttemptCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(["student"]))
 ):
-    exam = db.query(Exam).filter(Exam.id == attempt_data.exam_id).first()
-    if not exam:
-        raise HTTPException(status_code=404, detail="Exam not found")
-    if exam.status.value != "live":
-        raise HTTPException(status_code=400, detail="Exam is not live")
-
-    cutoff_time = datetime.utcnow() - timedelta(hours=24)
-
-    # Expire stale in-progress attempts (> 24 h old)
-    db.query(ExamAttempt).filter(
-        ExamAttempt.exam_id == attempt_data.exam_id,
-        ExamAttempt.student_id == current_user.id,
-        ExamAttempt.status == AttemptStatus.IN_PROGRESS,
-        ExamAttempt.started_at < cutoff_time,
-    ).update({"status": AttemptStatus.SUBMITTED})
-
-    # Resume existing valid attempt
-    existing = db.query(ExamAttempt).filter(
-        ExamAttempt.exam_id == attempt_data.exam_id,
-        ExamAttempt.student_id == current_user.id,
-        ExamAttempt.status == AttemptStatus.IN_PROGRESS,
-        ExamAttempt.started_at >= cutoff_time,
-    ).first()
-    if existing:
-        return existing
-
-    new_attempt = ExamAttempt(
-        exam_id=attempt_data.exam_id,
-        student_id=current_user.id,
-        status=AttemptStatus.IN_PROGRESS,
+    """Start a new attempt or resume the active one. Safe to call repeatedly."""
+    return await run_db(
+        db, lambda: _attempt_dto(_service_call(db, "start", attempt_data.exam_id, current_user.id))
     )
-    db.add(new_attempt)
-    db.commit()
-    db.refresh(new_attempt)
-    return new_attempt
+
+
+@router.get("/{attempt_id}/state")
+async def get_attempt_state(
+    attempt_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(["student"]))
+):
+    """
+    Everything the exam page needs to (re)hydrate after a reload or crash:
+    saved answers, the server-side deadline and the server's current time
+    (the client derives its countdown from these, never from its own clock).
+    """
+    return await run_db(db, _service_call, db, "get_state", attempt_id, current_user.id)
+
+
+@router.post("/{attempt_id}/auto-save", status_code=200)
+async def auto_save_progress(
+    attempt_id: UUID,
+    body: AutoSaveRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_role(["student"]))
+):
+    """
+    Durable, idempotent delta save. Upserts on (attempt_id, question_id);
+    replaying the same payload is a no-op, and an out-of-order (older
+    client_seq) save cannot overwrite a newer answer.
+    """
+    result = await run_db(
+        db, _service_call, db, "save_responses", attempt_id, current_user.id, _answers(body.responses)
+    )
+    return {"message": "Progress saved", **result}
+
+
+def _submit_blocking(db: Session, attempt_id: UUID, student_id, answers, idem_key):
+    """Everything in submit that blocks: DB transaction + evaluation dispatch."""
+    svc = AttemptService(db)
+    attempt, info = svc.submit(attempt_id, student_id, answers, idem_key)
+    exam_id = str(attempt.exam_id)
+
+    if info["replay"]:
+        body = {
+            "message": "Exam already submitted (idempotent replay).",
+            "attempt_id": str(attempt_id),
+            "status": attempt.status.value.lower() if hasattr(attempt.status, "value") else str(attempt.status),
+            "idempotent_replay": True,
+        }
+        return exam_id, body
+
+    base = {"attempt_id": str(attempt_id), "late": info["late"], "idempotent_replay": False}
+
+    dispatched, task_info = _try_celery(str(attempt_id))
+    if dispatched:
+        return exam_id, {
+            "message": "Exam submitted successfully. Results will be ready shortly.",
+            "task_id": task_info["task_id"],
+            "status": "evaluating",
+            **base,
+        }
+
+    logger.info("Evaluating attempt %s synchronously (Celery unavailable).", attempt_id)
+    result = EvaluationService(db).evaluate_attempt(attempt_id)
+    return exam_id, {
+        "message": "Exam submitted and evaluated successfully.",
+        "status": "evaluated",
+        **base,
+        **result,
+    }
 
 
 @router.post("/{attempt_id}/submit", response_model=dict)
@@ -134,75 +186,46 @@ async def submit_exam(
     attempt_id: UUID,
     submission: AttemptSubmit,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_role(["student"]))
+    current_user: User = Depends(require_role(["student"])),
+    idempotency_key: Optional[str] = Header(None, alias="Idempotency-Key", max_length=64),
 ):
-    attempt = db.query(ExamAttempt).filter(ExamAttempt.id == attempt_id).first()
-    if not attempt:
-        raise HTTPException(status_code=404, detail="Attempt not found")
-    if str(attempt.student_id) != str(current_user.id):
-        raise HTTPException(status_code=403, detail="Not authorized")
-
-    status_val = attempt.status.value if hasattr(attempt.status, "value") else str(attempt.status)
-    if status_val != AttemptStatus.IN_PROGRESS.value:
-        raise HTTPException(status_code=400, detail="Attempt already submitted")
-
-    # ── 1. Persist responses (fast SQL inserts) ───────────────────────────────
-    for rd in submission.responses:
-        db.add(Response(
-            attempt_id=attempt_id,
-            question_id=rd.question_id,
-            selected_option_ids=rd.selected_option_ids or [],
-            answer_text=rd.answer_text,
-            marked_for_review=rd.marked_for_review,
-        ))
-
-    attempt.submitted_at = datetime.utcnow()
-    attempt.time_taken_seconds = int(
-        (attempt.submitted_at - attempt.started_at).total_seconds()
-    )
-    attempt.status = AttemptStatus.SUBMITTED
-    db.commit()
-
-    # ── 2. Try Celery (non-blocking, 5 s max) ────────────────────────────────
-    dispatched, task_info = _try_celery(str(attempt_id))
-
-    if dispatched:
-        # Cache busting — best-effort, don't let it block
-        try:
-            await cache.delete(key_leaderboard(str(attempt.exam_id)))
-        except Exception:
-            pass
-        return {
-            "message": "Exam submitted successfully. Results will be ready shortly.",
-            "attempt_id": str(attempt_id),
-            "task_id": task_info["task_id"],
-            "status": "evaluating",
-        }
-
-    # ── 3. Synchronous fallback (always works, no Redis needed) ───────────────
-    logger.info("Evaluating attempt %s synchronously (Celery unavailable).", attempt_id)
-    svc = EvaluationService(db)
-    result = svc.evaluate_attempt(attempt_id)
-
+    """
+    Submit exactly once. Concurrency-safe via a compare-and-set status UPDATE;
+    a retry carrying the same Idempotency-Key gets a success replay instead of
+    an error. After deadline + grace the payload is ignored and the attempt is
+    closed with the answers that were auto-saved in time.
+    """
     try:
-        await cache.delete(key_leaderboard(str(attempt.exam_id)))
-    except Exception:
-        pass
+        exam_id, body = await run_db(
+            db, _submit_blocking, db, attempt_id, current_user.id,
+            _answers(submission.responses), idempotency_key,
+        )
+    except AttemptError as e:
+        _raise_http(e)
 
-    return {
-        "message": "Exam submitted and evaluated successfully.",
-        "attempt_id": str(attempt_id),
-        "status": "evaluated",
-        **result,
-    }
+    if not body.get("idempotent_replay"):
+        await cache.delete(key_leaderboard(exam_id))
+    return body
 
 
 @router.get("/{attempt_id}/results", response_model=dict)
-def get_results(
+async def get_results(
     attempt_id: UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    """
+    Final results, or ``202 {"status": "evaluating"}`` while a queued
+    evaluation is still pending — the client polls. The results page no
+    longer runs the evaluation on every poll.
+    """
+    body = await run_db(db, _results_blocking, db, attempt_id, current_user)
+    if body.get("status") == "evaluating":
+        return JSONResponse(status_code=202, content=body, headers={"Retry-After": "2"})
+    return body
+
+
+def _results_blocking(db: Session, attempt_id: UUID, current_user: User) -> dict:
     attempt = db.query(ExamAttempt).filter(ExamAttempt.id == attempt_id).first()
     if not attempt:
         raise HTTPException(status_code=404, detail="Attempt not found")
@@ -215,17 +238,26 @@ def get_results(
     elif role == "examiner" and str(exam.created_by) != str(current_user.id):
         raise HTTPException(status_code=403, detail="Not authorized")
 
+    # An attempt whose deadline passed is closed lazily on first touch.
+    AttemptService(db).finalize_if_expired(attempt)
+
     status_val = attempt.status.value if hasattr(attempt.status, "value") else str(attempt.status)
 
     if status_val == AttemptStatus.IN_PROGRESS.value:
         raise HTTPException(status_code=400, detail="Exam not yet submitted")
 
     if status_val == AttemptStatus.SUBMITTED.value:
-        # Evaluate now — covers the case where Celery worker hasn't picked it up yet
-        # or is unavailable (e.g. dev without Redis).
-        svc = EvaluationService(db)
-        result = svc.evaluate_attempt(attempt_id)
-        # Re-fetch updated attempt
+        # A queued evaluation is on its way: tell the client to poll.
+        if evaluation_dispatch.is_pending(attempt_id):
+            return {"status": "evaluating", "attempt_id": str(attempt_id)}
+        # Nothing queued (Celery down, or the task died and its marker expired):
+        # evaluate inline — but only one concurrent poller does it.
+        if not evaluation_dispatch.acquire_inline_lock(attempt_id):
+            return {"status": "evaluating", "attempt_id": str(attempt_id)}
+        try:
+            EvaluationService(db).evaluate_attempt(attempt_id)
+        finally:
+            evaluation_dispatch.release_inline_lock(attempt_id)
         db.refresh(attempt)
         status_val = AttemptStatus.EVALUATED.value
 
@@ -271,6 +303,7 @@ def get_results(
         t["percentage"] = round((t["correct"] / t["total"]) * 100, 1) if t["total"] else 0.0
 
     return {
+        "status": "evaluated",
         "score": score,
         "obtained_marks": obtained_marks,
         "total_marks": float(exam.total_marks),
@@ -286,31 +319,22 @@ def get_results(
 
 
 @router.get("/my-attempts", response_model=List[AttemptSchema])
-def get_my_attempts(
+async def get_my_attempts(
     limit: int = 10,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_role(["student"]))
 ):
-    return (
-        db.query(ExamAttempt)
-        .filter(ExamAttempt.student_id == current_user.id)
-        .order_by(ExamAttempt.started_at.desc())
-        .limit(limit)
-        .all()
-    )
+    def work():
+        rows = (
+            db.query(ExamAttempt)
+            .filter(ExamAttempt.student_id == current_user.id)
+            .order_by(ExamAttempt.started_at.desc())
+            .limit(min(limit, 100))
+            .all()
+        )
+        return [_attempt_dto(a) for a in rows]
 
-
-@router.post("/{attempt_id}/auto-save", status_code=200)
-def auto_save_progress(
-    attempt_id: UUID,
-    body: AutoSaveBody,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_role(["student"]))
-):
-    attempt = db.query(ExamAttempt).filter(ExamAttempt.id == attempt_id).first()
-    if not attempt or str(attempt.student_id) != str(current_user.id):
-        raise HTTPException(status_code=403, detail="Not authorized")
-    return {"message": "Progress saved", "saved": len(body.responses)}
+    return await run_db(db, work)
 
 
 # ── Manual grading (coding / subjective) ────────────────────────────────────────
