@@ -17,6 +17,7 @@ export default defineConfig({
         target: 'http://localhost:8000',
         changeOrigin: true,
         secure: false,
+        ws: true, // the proctoring WebSocket lives under /api/v1/monitor/enhanced/ws
       },
       // WebSocket proxy for proctoring / realtime features
       '/ws': {
