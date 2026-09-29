@@ -48,7 +48,7 @@ class AuthService:
         """
         access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
         access_token = create_access_token(
-            data={"sub": user.email},
+            data={"sub": user.email, "tv": user.token_version or 0},
             expires_delta=access_token_expires
         )
         return access_token
@@ -63,4 +63,4 @@ class AuthService:
         """
         Check if user exists
         """
-        return self.db.query(User).filter(User.email == email).first() is not None
+        return self.db.query(User).filter(User.email == email).first() is not None

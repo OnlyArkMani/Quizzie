@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, DateTime, Enum, Boolean
+from sqlalchemy import Column, String, DateTime, Enum, Boolean, Integer
 from sqlalchemy.dialects.postgresql import UUID
 from datetime import datetime
 import uuid
@@ -28,5 +28,10 @@ class User(Base):
     reset_token = Column(String(255), nullable=True)
     reset_token_expires = Column(DateTime, nullable=True)
     
+    # Revocation counter. Every JWT carries the value current at login ("tv");
+    # bumping it (logout, password reset) invalidates all previously issued
+    # tokens on their next request — no denylist to store or expire.
+    token_version = Column(Integer, nullable=False, default=0, server_default="0")
+
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

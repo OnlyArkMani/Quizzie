@@ -1,8 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Body, Request
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 from datetime import timedelta, datetime
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 import secrets
 
 from app.core.database import get_db
@@ -10,11 +9,12 @@ from app.core.security import verify_password, get_password_hash, create_access_
 from app.core.config import settings
 from app.models.user import User
 from app.schemas.user import UserCreate, UserLogin, User as UserSchema
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, invalidate_user_cache
+from app.core.limiter import limiter
+from app.core import rate_limit
 from app.services.email_service import send_verification_email, send_password_reset_email
 
 router = APIRouter()
-limiter = Limiter(key_func=get_remote_address)
 
 
 def _generate_token() -> str:
@@ -66,6 +66,7 @@ def verify_email(token: str, db: Session = Depends(get_db)):
     user.verification_token = None
     user.verification_token_expires = None
     db.commit()
+    invalidate_user_cache(user.email)
     return {"message": "Email verified successfully! You can now log in."}
 
 
@@ -94,9 +95,27 @@ def resend_verification(
 DEMO_EMAILS = {"examiner@demo.com", "student@demo.com"}
 
 
+# Login throttling is keyed two ways:
+#  * per ACCOUNT (10 attempts / minute) — the real brute-force protection;
+#  * per IP, but loose (300 / minute) — a whole class behind one campus NAT
+#    logs in at the same moment when an exam opens.
+# The old single "20/minute per IP" limit was effectively GLOBAL in production:
+# uvicorn ran without --proxy-headers, so every request's "client IP" was
+# nginx's — the 21st student to log in within a minute got 429.
+LOGIN_ATTEMPTS_PER_ACCOUNT = 10
+LOGIN_ACCOUNT_WINDOW_SECONDS = 60
+
+
 @router.post("/login")
-@limiter.limit("20/minute")
+@limiter.limit("300/minute")
 def login(request: Request, credentials: UserLogin, db: Session = Depends(get_db)):
+    if not rate_limit.allow_sync(
+        f"login:{credentials.email.lower()}", LOGIN_ATTEMPTS_PER_ACCOUNT, LOGIN_ACCOUNT_WINDOW_SECONDS
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many login attempts for this account. Try again in a minute.",
+        )
     user = db.query(User).filter(User.email == credentials.email).first()
     if not user or not verify_password(credentials.password, user.password_hash):
         raise HTTPException(
@@ -111,7 +130,7 @@ def login(request: Request, credentials: UserLogin, db: Session = Depends(get_db
             detail="Email not verified. Check your inbox.",
         )
     access_token = create_access_token(
-        data={"sub": user.email},
+        data={"sub": user.email, "tv": user.token_version or 0},
         expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
     )
     role_str = user.role.value if hasattr(user.role, "value") else str(user.role)
@@ -160,8 +179,30 @@ def reset_password(
     user.password_hash = get_password_hash(new_password)
     user.reset_token = None
     user.reset_token_expires = None
+    # A password reset must kill every existing session (e.g. a stolen token).
+    user.token_version = User.token_version + 1
     db.commit()
+    invalidate_user_cache(user.email)
     return {"message": "Password reset successfully. You can now log in."}
+
+
+@router.post("/logout")
+def logout(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Server-side logout: bump the user's token_version so every token issued
+    before now is rejected. Logs out all of the user's sessions (the simple,
+    stateless choice; per-device logout would need a jti denylist in Redis).
+    """
+    db.execute(
+        update(User).where(User.id == current_user.id)
+        .values(token_version=User.token_version + 1)
+    )
+    db.commit()
+    invalidate_user_cache(current_user.email)
+    return {"message": "Logged out"}
 
 
 @router.get("/me", response_model=UserSchema)
