@@ -12,6 +12,7 @@ from typing import Dict
 from app.models.attempt import ExamAttempt, Response, AttemptStatus
 from app.models.question import Question, Option, MANUAL_QUESTION_TYPES
 from app.models.exam import Exam
+from app.core.cache import invalidate_sync, key_leaderboard
 
 
 def _qtype(question) -> str:
@@ -101,6 +102,11 @@ class EvaluationService:
         attempt.status = AttemptStatus.EVALUATED
 
         self.db.commit()
+
+        # Invalidate the leaderboard when the SCORE exists, not at submit time:
+        # with async (Celery) evaluation, a leaderboard read between submit and
+        # evaluation would otherwise re-cache the old ranking for a full TTL.
+        invalidate_sync(key_leaderboard(str(attempt.exam_id)))
 
         return {
             "score": float(attempt.score),

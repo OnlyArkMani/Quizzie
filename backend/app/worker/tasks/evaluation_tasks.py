@@ -27,6 +27,8 @@ def evaluate_attempt_task(self, attempt_id: str) -> dict:
     try:
         svc = EvaluationService(db)
         result = svc.evaluate_attempt(UUID(attempt_id))
+        from app.services import evaluation_dispatch
+        evaluation_dispatch.clear_pending(attempt_id)
         logger.info("Evaluated attempt %s → score %.1f%%", attempt_id, result["score"])
         return result
     except Exception as exc:

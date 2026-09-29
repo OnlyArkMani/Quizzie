@@ -33,7 +33,9 @@ import sys
 
 celery_app = Celery(
     "quizzie",
-    broker=settings.REDIS_URL,
+    # A dedicated broker instance (noeviction) can be configured separately from
+    # the cache/pub-sub Redis; by default they share one instance.
+    broker=settings.CELERY_BROKER_URL or settings.REDIS_URL,
     backend=settings.REDIS_URL,
     include=[
         "app.worker.tasks.proctoring_tasks",

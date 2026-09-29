@@ -1,6 +1,11 @@
 """
 Celery tasks for AI proctoring.
 
+``analyze_latest_task`` is the current path (payload via the Redis mailbox,
+see app.core.frame_mailbox). ``analyze_frame_task`` / ``analyze_audio_task``
+(payload inside the message) are kept so tasks already queued during a deploy
+still run.
+
 These run in separate worker processes, completely off the FastAPI event loop.
 The web API enqueues a task and returns immediately (fire-and-forget for frame
 analysis). Results are persisted to PostgreSQL by the worker itself.
@@ -100,6 +105,54 @@ def analyze_audio_task(self, attempt_id: str, audio_bytes_b64: str) -> dict:
     except Exception as exc:
         logger.exception("analyze_audio_task failed for attempt %s", attempt_id)
         raise self.retry(exc=exc)
+
+
+@celery_app.task(
+    name="app.worker.tasks.proctoring_tasks.analyze_latest_task",
+    bind=True,
+    max_retries=0,          # a retry would analyse an even staler frame; the next
+                            # upload re-enqueues anyway (see frame_mailbox)
+)
+def analyze_latest_task(self, attempt_id: str, kind: str) -> dict:
+    """
+    Mailbox variant: the message carries only (attempt, kind). The payload is
+    claimed from Redis at execution time, so it is always the NEWEST frame the
+    student sent — older ones that arrived while this task waited were
+    overwritten (coalesced), not queued.
+    """
+    from app.core import frame_mailbox
+
+    payload = frame_mailbox.take(kind, attempt_id)
+    if payload is None:
+        return {"skipped": True}     # already claimed by a sibling task, or expired
+    try:
+        if kind == "frame":
+            return _analyze_frame_bytes(attempt_id, payload)
+        return _analyze_audio_bytes(attempt_id, payload)
+    except Exception:
+        logger.exception("analyze_latest_task failed for attempt %s (%s)", attempt_id, kind)
+        return {"error": True}
+
+
+def _analyze_frame_bytes(attempt_id: str, image_bytes: bytes) -> dict:
+    from app.ai_monitor import snapshot
+
+    result = _get_face_detector().analyze_frame(image_bytes)
+    if result.get("flags"):
+        snapshot.attach_snapshots(image_bytes, result["flags"])
+        _persist_flags(attempt_id, result["flags"])
+    return result
+
+
+def _analyze_audio_bytes(attempt_id: str, audio_bytes: bytes) -> dict:
+    result = _get_audio_analyzer().analyze_audio(audio_bytes)
+    if result.get("flags"):
+        flags_as_dicts = [
+            {"type": f, "severity": result.get("severity", "medium"), "message": f}
+            for f in result["flags"]
+        ]
+        _persist_flags(attempt_id, flags_as_dicts)
+    return result
 
 
 # ── Helper ─────────────────────────────────────────────────────────────────────
