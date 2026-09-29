@@ -59,9 +59,11 @@ export function debounce<T extends (...args: Parameters<T>) => ReturnType<T>>(
   func: T,
   wait: number
 ): (...args: Parameters<T>) => void {
-  let timeout: ReturnType<typeof window.setTimeout>;
+  // Plain `number`: with @types/node in scope even ReturnType<typeof
+  // window.setTimeout> resolves to NodeJS.Timeout, which failed `tsc --noEmit`.
+  let timeout: number | undefined;
   return (...args: Parameters<T>) => {
-    clearTimeout(timeout);
+    window.clearTimeout(timeout);
     timeout = window.setTimeout(() => func(...args), wait);
   };
 }

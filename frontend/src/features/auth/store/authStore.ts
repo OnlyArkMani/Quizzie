@@ -16,13 +16,14 @@ interface AuthState {
   isAuthenticated: boolean;
   
   login: (user: User, token: string) => void;
-  logout: () => void;
+  /** revokeOnServer (default true): also kill the token server-side. */
+  logout: (opts?: { revokeOnServer?: boolean }) => void;
   updateUser: (user: Partial<User>) => void;
 }
 
 export const useAuthStore = create<AuthState>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       user: null,
       token: null,
       isAuthenticated: false,
@@ -35,7 +36,19 @@ export const useAuthStore = create<AuthState>()(
         });
       },
       
-      logout: () => {
+      logout: (opts) => {
+        // Server-side revocation (bumps the user's token_version, so this and
+        // every other session's token stop working). Plain fetch, not the
+        // axios instance: api.ts imports this store, and the 401 handler calls
+        // logout({revokeOnServer: false}) — a dead token has nothing to revoke.
+        const token = get().token;
+        if (token && opts?.revokeOnServer !== false) {
+          fetch('/api/v1/auth/logout', {
+            method: 'POST',
+            keepalive: true,
+            headers: { Authorization: `Bearer ${token}` },
+          }).catch(() => {});
+        }
         set({ 
           user: null, 
           token: null, 
@@ -53,4 +66,4 @@ export const useAuthStore = create<AuthState>()(
       name: 'auth-storage',
     }
   )
-);
+);

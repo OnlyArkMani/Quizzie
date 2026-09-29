@@ -28,7 +28,7 @@ api.interceptors.response.use(
   (error) => {
     if (error.response?.status === 401) {
       // Call the store's logout action — updates state AND clears localStorage
-      useAuthStore.getState().logout();
+      useAuthStore.getState().logout({ revokeOnServer: false });
       // Only redirect if we're not already on a public page
       const publicPaths = ["/login", "/register", "/verify-email", "/forgot-password", "/reset-password"];
       if (!publicPaths.some((p) => window.location.pathname.startsWith(p))) {

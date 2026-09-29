@@ -88,6 +88,27 @@ export interface Answer {
   textAnswer?: string;        // coding/subjective free-text answer
   markedForReview: boolean;
   visited: boolean;
+  // Monotonic edit counter sent with auto-saves; the server keeps the answer
+  // with the highest seq, so a slow/retried older save can't win.
+  clientSeq: number;
+}
+
+/** GET /attempts/{id}/state — everything needed to resume an attempt. */
+export interface AttemptState {
+  attempt_id: string;
+  exam_id: string;
+  status: 'in_progress' | 'submitted' | 'evaluated';
+  started_at: string;
+  deadline: string | null;
+  server_now: string;
+  remaining_seconds: number | null;
+  responses: {
+    question_id: string;
+    selected_option_ids: string[];
+    answer_text: string | null;
+    marked_for_review: boolean;
+    client_seq: number;
+  }[];
 }
 
 export interface ExamAttempt {
