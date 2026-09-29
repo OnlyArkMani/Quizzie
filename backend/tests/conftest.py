@@ -19,6 +19,9 @@ os.environ["DATABASE_URL"] = TEST_DB_URL
 os.environ["REDIS_URL"] = "redis://localhost:6379/1"   # DB 1 for tests
 os.environ["SECRET_KEY"] = "test-secret-key-not-for-production-only"
 os.environ["ENVIRONMENT"] = "test"
+# No Celery worker runs in tests: evaluate inline instead of queueing tasks that
+# would never be consumed. (Tests that exercise queueing opt back in.)
+os.environ.setdefault("EVALUATION_MODE", "inline")
 
 
 from app.core.database import Base, get_db
@@ -39,12 +42,31 @@ def engine():
     Base.metadata.drop_all(bind=eng)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_redis():
+    """
+    Each test starts with an empty Redis test DB (db 1). The Postgres side is
+    rolled back per test; without this, Redis state (cached users, rate-limit
+    windows, cached questions) would leak between tests — e.g. a cached user
+    whose row was rolled back.
+    """
+    from app.core import rate_limit, redis_client
+
+    client = redis_client.get_sync_redis()
+    if client is not None:
+        client.flushdb()
+    rate_limit.reset_local_for_tests()
+    yield
+
+
 @pytest.fixture(scope="function")
 def db(engine):
     """Each test gets a fresh transaction that is rolled back after."""
     connection = engine.connect()
     transaction = connection.begin()
-    TestingSession = sessionmaker(bind=connection)
+    # create_savepoint: a session.rollback() inside app code rolls back to a
+    # SAVEPOINT instead of discarding the whole per-test outer transaction.
+    TestingSession = sessionmaker(bind=connection, join_transaction_mode="create_savepoint")
     session = TestingSession()
 
     yield session
