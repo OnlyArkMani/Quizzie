@@ -9,3 +9,6 @@ venv/
 env/ 
 __pycache__/ 
 *.pyc 
+
+# Load-test fixture (contains minted JWTs)
+backend/loadtest/fixture.json
